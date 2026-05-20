@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Weather Chatbot & GIS Map</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --secondary: #f8fafc;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bg-body: #f1f5f9;
+            --card-bg: #ffffff;
+            --border-color: #e2e8f0;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.05), 0 2px 4px -1px rgba(0,0,0,0.03);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: var(--bg-body);
+            color: var(--text-main);
+            overflow: hidden;
+        }
+        
+        /* Layout */
+        .container {
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+        
+        #map {
+            flex: 1;
+            z-index: 1;
+            position: relative;
+        }
+        
+        /* Sidebar Styling */
+        .sidebar {
+            width: 420px;
+            background: var(--card-bg);
+            display: flex;
+            flex-direction: column;
+            box-shadow: -5px 0 25px rgba(0,0,0,0.05);
+            z-index: 10;
+            border-left: 1px solid var(--border-color);
+        }
+
+        .sidebar-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--card-bg);
+        }
+        
+        .sidebar-header h2 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-main);
+        }
+
+        .sidebar-header h2 i {
+            color: var(--primary);
+        }
+
+        .sidebar-content {
+            padding: 24px;
+            overflow-y: auto;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        /* Status Banner */
+        .status-banner {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #1e3a8a;
+        }
+        
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            background: var(--success);
+            border-radius: 50%;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        
+        /* Info Cards */
+        .card {
+            background: var(--secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 16px;
+        }
+
+        .instructions-card {
+            background: #fffbeb;
+            border-color: #fde68a;
+        }
+
+        .card-title {
+            font-size: 0.875rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-main);
+        }
+
+        .instructions-card .card-title { color: #92400e; }
+
+        .instructions-list {
+            list-style: none;
+            font-size: 0.85rem;
+            color: #b45309;
+            line-height: 1.6;
+        }
+
+        .instructions-list li {
+            position: relative;
+            padding-left: 20px;
+            margin-bottom: 6px;
+        }
+        
+        .instructions-list li::before {
+            content: "•";
+            position: absolute;
+            left: 5px;
+            color: #f59e0b;
+            font-weight: bold;
+        }
+        
+        /* Stats Table */
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px dashed var(--border-color);
+            font-size: 0.875rem;
+        }
+        
+        .stat-item:last-child { border-bottom: none; padding-bottom: 0; }
+        .stat-label { color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
+        .stat-value { font-weight: 700; color: var(--text-main); }
+        
+        /* Buttons */
+        .button-group { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        
+        .btn {
+            padding: 12px 16px;
+            border: none;
+            border-radius: 12px;
+            font-family: inherit;
+            font-weight: 600;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        
+        .btn-danger { background: #fee2e2; color: #b91c1c; }
+        .btn-danger:hover { background: #fca5a5; transform: translateY(-2px); }
+        
+        .btn-secondary { background: var(--card-bg); color: var(--text-main); border: 1px solid var(--border-color); }
+        .btn-secondary:hover { background: var(--bg-body); transform: translateY(-2px); box-shadow: var(--shadow-md); }
+
+        /* Terminal Log */
+        .terminal-log {
+            background: #0f172a;
+            border-radius: 12px;
+            padding: 16px;
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-size: 0.75rem;
+            color: #94a3b8;
+            height: 180px;
+            overflow-y: auto;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .terminal-log div { margin-bottom: 6px; line-height: 1.4; animation: fadeIn 0.3s ease; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Footer */
+        .sidebar-footer {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-body);
+            text-align: center;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .sidebar-footer span { color: var(--primary); font-weight: 700; }
+        
+        /* Chat Container */
+        #weather-chat-messages {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        
+        .chat-input-wrapper { position: relative; margin-top: 16px; }
+        
+        #weather-chat-input {
+            width: 100%;
+            padding: 14px 45px 14px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            font-family: inherit;
+            font-size: 0.875rem;
+            outline: none;
+            transition: all 0.2s;
+            box-shadow: var(--shadow-sm);
+        }
+        
+        #weather-chat-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1); }
+        
+        .btn-send {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: var(--primary);
+            color: white;
+            border: none;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .btn-send:hover { background: var(--primary-hover); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <main id="map"></main>
+        
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fa-solid fa-robot"></i> AI Weather Assistant</h2>
+            </div>
+            
+            <div class="sidebar-content">
+                
+                <div class="status-banner">
+                    <span class="status-indicator"></span>
+                    Hệ thống Backend đã sẵn sàng
+                </div>
+                
+                <div class="card instructions-card">
+                    <div class="card-title">
+                        <i class="fa-solid fa-map-location-dot"></i> Hướng dẫn sử dụng
+                    </div>
+                    <ul class="instructions-list">
+                        <li>Click vào một điểm trên bản đồ để chọn vị trí.</li>
+                        <li>Nhập câu hỏi về thời tiết tại khu vực đó.</li>
+                        <li>Nhấn Enter hoặc nút Gửi để trò chuyện.</li>
+                        <li>Chờ AI phân tích và trả về kết quả.</li>
+                    </ul>
+                </div>
+                
+                <div class="card">
+                    <div class="stat-item">
+                        <span class="stat-label"><i class="fa-solid fa-server"></i> API Status</span>
+                        <span class="stat-value" id="api-status">🔄 Checking...</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label"><i class="fa-solid fa-location-crosshairs"></i> Vị trí chọn</span>
+                        <span class="stat-value" id="current-location">Chưa chọn</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label"><i class="fa-regular fa-message"></i> Tin nhắn</span>
+                        <span class="stat-value" id="message-count">0</span>
+                    </div>
+                </div>
+                
+                <div class="button-group">
+                    <button class="btn btn-danger" onclick="clearChat()">
+                        <i class="fa-solid fa-trash-can"></i> Xóa Chat
+                    </button>
+                    <button class="btn btn-secondary" onclick="resetLocation()">
+                        <i class="fa-solid fa-rotate-right"></i> Reset Vị trí
+                    </button>
+                </div>
+                <a href="http://localhost:8501" style="text-decoration: none; margin-top: 12px; display: block;">
+                    <button class="btn" style="width: 100%; background: linear-gradient(135deg, #4f46e5, #3b82f6); color: white; border: none; box-shadow: 0 4px 15px rgba(79, 70, 229, 0.2);">
+                        <i class="fa-solid fa-earth-asia"></i> TRỞ VỀ BẢN ĐỒ VỆ TINH
+                    </button>
+                </a>
+                <div class="card" style="padding: 0; overflow: hidden; border: none;">
+                    <div class="terminal-log" id="status-log">
+                        <div style="color: var(--success);">> [System] Giao diện đã khởi tạo thành công</div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: auto;">
+                    <div id="weather-chat-messages">
+                        </div>
+                    <div class="chat-input-wrapper">
+                        <input type="text" id="weather-chat-input" placeholder="Hỏi thời tiết tại đây..." onkeypress="handleEnter(event)">
+                        <button class="btn-send" onclick="triggerSend()">
+                            <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </div>
+                </div>
+
+            </div>
+            
+            <div class="sidebar-footer">
+                GIS Weather System v2.0 &bull; Powered by <span>Gemini AI</span>
+            </div>
+        </aside>
+    </div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    
+    <script>
+        let map;
+        let messageCount = 0;
+        let currentWeatherMarker = null;
+        
+        // Khởi tạo bản đồ
+        function initMap() {
+            map = L.map('map', {
+                zoomControl: false
+            }).setView([16.0, 106.0], 6);
+            
+            L.control.zoom({ position: 'topright' }).addTo(map);
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+                maxZoom: 20
+            }).addTo(map);
+            
+            // --- SỰ KIỆN CLICK CHỌN VỊ TRÍ TRÊN BẢN ĐỒ ---
+            map.on('click', function(e) {
+                const lat = e.latlng.lat;
+                const lng = e.latlng.lng;
+
+                // Xóa marker cũ
+                if (currentWeatherMarker) {
+                    map.removeLayer(currentWeatherMarker);
+                }
+
+                // Cắm marker mới và hiển thị popup
+                currentWeatherMarker = L.marker([lat, lng]).addTo(map)
+                    .bindPopup(`<b>Vị trí đã chọn</b><br>Lat: ${lat.toFixed(4)}<br>Lon: ${lng.toFixed(4)}`)
+                    .openPopup();
+
+                // Cập nhật lên Sidebar
+                updateLocation(lat, lng);
+                
+                // Tự động focus vào ô nhập chat
+                const chatInput = document.getElementById('weather-chat-input');
+                if (chatInput) {
+                    chatInput.focus();
+                }
+            });
+            
+            addLog('> [Map] Tải bản đồ thành công (CartoDB Voyager)');
+        }
+        
+        // Kiểm tra API Status
+        async function checkAPIStatus() {
+            try {
+                // Thay url này bằng route health check thật của bạn
+                const response = await fetch('http://localhost:5000/api/health', {
+                    method: 'GET',
+                    timeout: 5000
+                }).catch(() => ({ ok: false })); // Bắt lỗi mạng
+                
+                if (response.ok) {
+                    updateStatus('api-status', 'Online', 'var(--success)');
+                    document.getElementById('api-status').innerHTML = '<i class="fa-solid fa-circle-check" style="color:var(--success); margin-right:4px;"></i> Online';
+                } else {
+                    document.getElementById('api-status').innerHTML = '<i class="fa-solid fa-triangle-exclamation" style="color:var(--warning); margin-right:4px;"></i> Error';
+                }
+            } catch (error) {
+                document.getElementById('api-status').innerHTML = '<i class="fa-solid fa-plug-circle-xmark" style="color:var(--danger); margin-right:4px;"></i> Offline';
+            }
+        }
+        
+        // Cập nhật trạng thái text
+        function updateStatus(elementId, text, color) {
+            const el = document.getElementById(elementId);
+            if (el) {
+                el.textContent = text;
+                el.style.color = color;
+            }
+        }
+        
+        // Terminal Log Style
+        function addLog(message, type = 'info') {
+            const logEl = document.getElementById('status-log');
+            const timestamp = new Date().toLocaleTimeString('vi-VN', { hour12: false });
+            const logEntry = document.createElement('div');
+            
+            let color = '#94a3b8'; // default
+            if (type === 'success' || message.includes('thành công')) color = 'var(--success)';
+            if (type === 'warning') color = 'var(--warning)';
+            if (type === 'error') color = 'var(--danger)';
+            if (message.includes('Gửi')) color = '#38bdf8'; // Blue
+            if (message.includes('Vị trí')) color = '#c084fc'; // Purple
+
+            logEntry.style.color = color;
+            logEntry.innerHTML = `<span style="color:#64748b">[${timestamp}]</span> ${message}`;
+            
+            logEl.appendChild(logEntry);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        
+        // Cập nhật tọa độ
+        function updateLocation(lat, lon) {
+            const el = document.getElementById('current-location');
+            if (el) {
+                el.innerHTML = `<code>${lat.toFixed(4)}, ${lon.toFixed(4)}</code>`;
+            }
+            addLog(`> [Location] Tọa độ chọn: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+        }
+        
+        // Cập nhật số lượng tin nhắn
+        function updateMessageCount() {
+            messageCount++;
+            const el = document.getElementById('message-count');
+            if (el) {
+                el.textContent = messageCount;
+            }
+        }
+        
+        // Xử lý gửi tin nhắn
+        function handleEnter(e) {
+            if(e.key === 'Enter') triggerSend();
+        }
+
+        // --- GỌI API AI TẠI ĐÂY ---
+        function triggerSend() {
+            const input = document.getElementById("weather-chat-input");
+            const message = input.value.trim();
+            
+            if (message) {
+                if (!currentWeatherMarker) {
+                    alert("Vui lòng click chọn một vị trí trên bản đồ trước khi hỏi thời tiết!");
+                    return;
+                }
+
+                updateMessageCount();
+                addLog(`> [User] Gửi: "${message}"`);
+                
+                const chatContainer = document.getElementById('weather-chat-messages');
+                const sidebarContent = document.querySelector('.sidebar-content');
+
+                // 1. Hiển thị tin nhắn của User
+                chatContainer.innerHTML += `
+                    <div style="display: flex; justify-content: flex-end; margin-bottom: 12px;">
+                        <div style="background: var(--bg-body); padding: 10px 14px; border-radius: 12px; border-right: 3px solid var(--primary); font-size: 0.875rem; text-align: right; max-width: 85%;">
+                            ${message}
+                        </div>
+                    </div>
+                `;
+                
+                input.value = '';
+                sidebarContent.scrollTop = sidebarContent.scrollHeight; 
+                
+                // 2. Hiển thị trạng thái "Bot đang suy nghĩ..."
+                const typingId = 'typing-' + Date.now();
+                chatContainer.innerHTML += `
+                    <div id="${typingId}" style="display: flex; gap: 10px; margin-bottom: 12px; align-items: center;">
+                        <div style="font-size: 1.25rem; color: var(--primary);"><i class="fa-solid fa-robot"></i></div>
+                        <div style="background: #e0e7ff; padding: 10px 14px; border-radius: 12px; font-size: 0.875rem; color: #3730a3; opacity: 0.7;">
+                            <i>Đang phân tích dữ liệu...</i>
+                        </div>
+                    </div>
+                `;
+                sidebarContent.scrollTop = sidebarContent.scrollHeight;
+
+                // 3. Gọi Fetch API (Kết nối tới Backend)
+                const {lat, lng} = currentWeatherMarker.getLatLng();
+                const requestData = {
+                    message: message,
+                    lat: lat,
+                    lon: lng
+                };
+
+                // Đảm bảo URL này khớp với server Backend của bạn
+                fetch('http://localhost:5000/api/weather_chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestData)
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Lỗi mạng hoặc Backend không phản hồi');
+                    }
+                    return response.json(); 
+                })
+                .then(data => {
+                    // Xóa dòng "Đang phân tích..."
+                    const typingEl = document.getElementById(typingId);
+                    if(typingEl) typingEl.remove();
+                    
+                    // Lấy câu trả lời (Backend trả về ai_response)
+                    const botReply = data.ai_response || data.reply || data.answer || data.message || "Xin lỗi, tôi không nhận được dữ liệu.";
+
+                    // In câu trả lời
+                    chatContainer.innerHTML += `
+                        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+                            <div style="font-size: 1.25rem; color: var(--primary);"><i class="fa-solid fa-robot"></i></div>
+                            <div style="background: #e0e7ff; padding: 10px 14px; border-radius: 12px; border-left: 3px solid var(--primary); font-size: 0.875rem; color: #3730a3; line-height: 1.5;">
+                                ${botReply}
+                            </div>
+                        </div>
+                    `;
+                    sidebarContent.scrollTop = sidebarContent.scrollHeight;
+                    addLog(`> [Bot] Nhận phản hồi thành công`, 'success');
+                })
+                .catch(error => {
+                    const typingEl = document.getElementById(typingId);
+                    if(typingEl) typingEl.remove();
+
+                    chatContainer.innerHTML += `
+                        <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+                            <div style="font-size: 1.25rem; color: var(--danger);"><i class="fa-solid fa-triangle-exclamation"></i></div>
+                            <div style="background: #fee2e2; padding: 10px 14px; border-radius: 12px; border-left: 3px solid var(--danger); font-size: 0.875rem; color: #991b1b; line-height: 1.5;">
+                                Lỗi kết nối API: Vui lòng kiểm tra lại Backend. <br>
+                                <i>${error.message}</i>
+                            </div>
+                        </div>
+                    `;
+                    sidebarContent.scrollTop = sidebarContent.scrollHeight;
+                    addLog(`> [Error] Lỗi API: ${error.message}`, 'error');
+                });
+            }
+        }
+        
+        // Xóa nội dung chat
+        function clearChat() {
+            const chatContainer = document.getElementById('weather-chat-messages');
+            if (chatContainer) {
+                chatContainer.innerHTML = `
+                    <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+                        <div style="font-size: 1.25rem; color: var(--primary);"><i class="fa-solid fa-robot"></i></div>
+                        <div style="background: #e0e7ff; padding: 10px 14px; border-radius: 12px; border-left: 3px solid var(--primary); font-size: 0.875rem; color: #3730a3; line-height: 1.5;">
+                            Màn hình chat đã được làm sạch. Hãy chọn một điểm trên bản đồ và đặt câu hỏi cho tôi nhé!
+                        </div>
+                    </div>
+                `;
+            }
+            messageCount = 0;
+            updateMessageCount();
+            addLog('> [System] Đã xóa lịch sử trò chuyện', 'warning');
+        }
+        
+        // Reset vị trí bản đồ
+        function resetLocation() {
+            if (currentWeatherMarker) {
+                map.removeLayer(currentWeatherMarker);
+                currentWeatherMarker = null;
+            }
+            document.getElementById('current-location').innerHTML = '<span style="color: var(--text-muted)">Chưa chọn</span>';
+            addLog('> [Map] Vị trí đánh dấu đã được gỡ bỏ', 'warning');
+            map.setView([16.0, 106.0], 6); // Reset về tọa độ trung tâm VN
+        }
+        
+        // Khởi động khi tải xong trang
+        window.addEventListener('DOMContentLoaded', function() {
+            initMap();
+            checkAPIStatus();
+            clearChat(); 
+        });
+        
+        // Ping API 30 giây một lần
+        setInterval(checkAPIStatus, 30000);
+    </script>
+</body>
+</html>
