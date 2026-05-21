@@ -1051,6 +1051,62 @@ def layer_status(layer, val):
         return "Trung bình", "#f59e0b"
 
 # ─── GEOCODING & WEATHER ──────────────────────────────────────────────────────
+def compute_trend_accuracy_summary(result: dict, layer: str) -> dict:
+    trend = result.get("trend_data") or []
+    years, values = [], []
+    for row in trend:
+        y = row.get("Năm")
+        v = row.get("Trị số")
+        if y is not None and v is not None and not pd.isna(v):
+            years.append(int(y))
+            values.append(float(v))
+    metrics = evaluate_prophet_series(years, values, test_size=2)
+    if not metrics:
+        return {
+            "available": False,
+            "label": "Chưa đủ dữ liệu",
+            "summary": "Chuỗi thời gian hiện tại chưa đủ tối thiểu 5 năm hợp lệ để backtest độ chính xác mô hình.",
+        }
+
+    mape = metrics.get("MAPE")
+    rmse = metrics.get("RMSE")
+    if mape is None:
+        label = "Không tính được MAPE"
+        note = "MAPE không khả dụng do dữ liệu kiểm thử có giá trị bằng 0."
+    elif mape < 10:
+        label = "Rất tốt"
+        note = "Sai số phần trăm thấp, mô hình có độ ổn định cao trên tập kiểm thử."
+    elif mape < 20:
+        label = "Tốt"
+        note = "Sai số ở mức chấp nhận tốt cho phân tích xu hướng viễn thám."
+    elif mape < 35:
+        label = "Trung bình"
+        note = "Mô hình dùng được cho tham khảo xu hướng, nhưng cần thận trọng khi diễn giải dự báo."
+    else:
+        label = "Thấp"
+        note = "Sai số cao, kết quả dự báo chỉ nên xem như tín hiệu tham khảo sơ bộ."
+
+    mape_text = f"{mape:.2f}%" if mape is not None else "N/A"
+    rmse_text = fmt_val(layer, rmse) if rmse is not None else "N/A"
+    test_years = ", ".join(str(y) for y in metrics.get("test_years", []))
+    return {
+        "available": True,
+        "label": label,
+        "mape": mape,
+        "rmse": rmse,
+        "mape_text": mape_text,
+        "rmse_text": rmse_text,
+        "n_train": metrics.get("n_train"),
+        "n_test": metrics.get("n_test"),
+        "test_years": test_years,
+        "summary": (
+            f"Độ chính xác backtest của chuỗi {layer}: MAPE = {mape_text}, RMSE = {rmse_text}. "
+            f"Mô hình được huấn luyện trên {metrics.get('n_train')} năm và kiểm thử trên "
+            f"{metrics.get('n_test')} năm cuối ({test_years}). Đánh giá: {label}. {note}"
+        ),
+    }
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_address_from_coords(lat, lon):
     try:
@@ -1622,6 +1678,7 @@ def build_beautiful_report_html(
     esc = lambda v: html.escape(str(v if v is not None else ""))
     generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
     roi = result.get("roi_names", "")
+    accuracy = compute_trend_accuracy_summary(result, params.layer)
 
     trend_rows = ""
     for row in result.get("trend_data", []):
@@ -1665,6 +1722,9 @@ def build_beautiful_report_html(
     ai_section = (
         f"<section><h2>Báo cáo AI Gemini</h2><p>{esc(ai_report)}</p></section>"
         if ai_report else ""
+    )
+    accuracy_section = (
+        f"<section><h2>Độ chính xác mô hình</h2><p>{esc(accuracy['summary'])}</p></section>"
     )
 
     return f"""<!doctype html>
@@ -1731,10 +1791,12 @@ def build_beautiful_report_html(
         <tr><th>Chỉ tiêu</th><th>Giá trị</th></tr>
         <tr><td>Chỉ số phân tích</td><td>{esc(params.layer)} - {esc(meta['env_context'])}</td></tr>
         <tr><td>Diện tích nguy cơ cao</td><td>{a_high:,.0f} Ha</td></tr>
+        <tr><td>Độ chính xác</td><td>{esc(accuracy['label'])}</td></tr>
         <tr><td>Thời điểm xuất báo cáo</td><td>{generated_at}</td></tr>
       </table>
     </section>
     {ai_section}
+    {accuracy_section}
     {analysis_rows}
     <section>
       <h2>Xu hướng theo thời gian</h2>
@@ -1829,6 +1891,7 @@ def build_pdf_report(
 
     roi = result.get("roi_names", "")
     meta = CONFIG["layer_meta"][params.layer]
+    accuracy = compute_trend_accuracy_summary(result, params.layer)
     story = [
         Paragraph(f"Báo cáo phân tích {params.layer} - {roi}", styles["ReportTitle"]),
         small_table([
@@ -1846,11 +1909,14 @@ def build_pdf_report(
             ["Biến động trung bình", f"{delta_mean:+.4f}"],
             ["Diện tích nguy cơ", f"{a_high:,.0f} Ha"],
             ["Đánh giá", status],
+            ["Độ chính xác", accuracy["label"]],
         ], widths=[6.0 * cm, 11.0 * cm]),
     ]
 
     if ai_report:
         story += [Paragraph("Báo cáo chuyên sâu", styles["SectionTitle"]), p(ai_report)]
+
+    story += [Paragraph("Độ chính xác mô hình", styles["SectionTitle"]), p(accuracy["summary"])]
 
     for key, label in [
         ("technical", "Phân tích kỹ thuật"),
@@ -3530,6 +3596,15 @@ with col_report:
             )
             render_analysis_box(analysis)
 
+        with st.expander("📐 Độ chính xác mô hình", expanded=False):
+            accuracy = compute_trend_accuracy_summary(result, params.layer)
+            if accuracy.get("available"):
+                c_acc1, c_acc2, c_acc3 = st.columns(3)
+                c_acc1.metric("MAPE", accuracy["mape_text"])
+                c_acc2.metric("RMSE", accuracy["rmse_text"])
+                c_acc3.metric("Đánh giá", accuracy["label"])
+            st.info(accuracy["summary"])
+
         # ── Chart tabs ───────────────────────────────────────────────────
         tab_labels = ["⛅ Thời tiết", "📈 Xu hướng", "📊 Mật độ",
                       "🥧 Cơ cấu", "🌡️ Đảo nhiệt", "🌐 So vùng",
@@ -3587,6 +3662,7 @@ with col_report:
             analysis_dict = auto_academic_analysis(
                 params.layer, l_mean_first, l_mean_last, a_high, result["roi_names"]
             )
+            accuracy_dict = compute_trend_accuracy_summary(result, params.layer)
             try:
                 pdf_bytes = build_pdf_report(
                     params=params,
@@ -3637,6 +3713,7 @@ with col_report:
                 + f"Biến động: {delta_mean:+.4f}\n"
                 + f"Diện tích nguy cơ: {a_high:,.0f} Ha\n"
                 + f"Đánh giá: {status}\n"
+                + f"\n=== Độ chính xác mô hình ===\n{accuracy_dict['summary']}\n"
             )
             st.download_button("🔬 TXT — Phân tích Học thuật",
                                data=full_text.encode("utf-8"),
