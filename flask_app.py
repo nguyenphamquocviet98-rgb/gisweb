@@ -4,7 +4,7 @@ from datetime import datetime
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 # Load environment variables from .env file

@@ -7,7 +7,7 @@ import os
 import requests
 import json
 import sys
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 # Load environment variables from .env

@@ -12,7 +12,7 @@ scikit-learn
 prophet
 requests
 python-dotenv
-google-generativeai
+google-genai
 geopy
 flask
 flask-cors
