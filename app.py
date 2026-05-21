@@ -3509,13 +3509,11 @@ with col_report:
             if not ai_trigger:
                 if st.button("🤖 Sinh báo cáo AI Gemini", use_container_width=True, key="btn_gen_ai"):
                     st.session_state["ai_trigger"] = True
-                    st.rerun(scope="fragment")
                 return
 
             with st.spinner("🤖 Gemini AI đang phân tích..."):
                 report = generate_gemini_report(params.layer, first_y, last_y, l_mean_first, l_mean_last, a_high, result["roi_names"])
                 st.session_state["cached_report"] = report
-            st.rerun(scope="fragment")
 
         _ai_report_fragment()
 
