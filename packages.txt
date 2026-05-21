@@ -1,2 +1,4 @@
 unixodbc-dev
 g++
+build-essential
+python3-dev
