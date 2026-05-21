@@ -1420,23 +1420,81 @@ Câu hỏi từ người dùng:
     # Friendly Vietnamese error message
     err_str = str(last_err or "")
     if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
-        return ("⚠️ **Cả 4 Gemini API key đều đã hết quota free tier hôm nay.**\n\n"
-                "Vui lòng:\n"
-                "- Đợi reset quota (khoảng 24h, tính theo Pacific Time)\n"
-                "- Hoặc cấp Gemini API key mới tại https://aistudio.google.com/apikey "
-                "rồi cập nhật `GEMINI_KEY_1..4` trong `.env`\n"
-                "- Hoặc nâng cấp lên paid tier ở Google Cloud")
+        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "Gemini hết quota")
     if "503" in err_str or "UNAVAILABLE" in err_str:
-        return ("⚠️ **Gemini AI đang quá tải.** "
-                "Hệ thống đã thử cả 2 model × 4 key. Bạn thử lại sau 1–2 phút nhé.")
+        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "Gemini đang quá tải")
     if "401" in err_str or "API_KEY_INVALID" in err_str or "API KEY NOT VALID" in err_str.upper() or "API KEY EXPIRED" in err_str.upper():
-        return ("⚠️ **API key Gemini không hợp lệ.** "
-                "Vui lòng kiểm tra `GEMINI_KEY_1..4` trong Streamlit Secrets hoặc file `.env`.")
+        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "API key Gemini không hợp lệ")
     if "404" in err_str or "NOT_FOUND" in err_str:
-        return ("⚠️ **Model Gemini không khả dụng.** "
-                "Có thể Google đã đổi tên model. Liên hệ admin cập nhật `GEMINI_MODELS`.")
-    return (f"Trợ lý AI hiện tại đang quá tải, vui lòng thử lại sau ít phút! "
-            f"(Chi tiết: `{type(last_err).__name__ if last_err else 'unknown'}`)")
+        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "model Gemini không khả dụng")
+    return local_chat_reply(user_message, lat, lon, address, params, result, weather, type(last_err).__name__ if last_err else "không rõ")
+
+
+def local_chat_reply(user_message: str, lat: float, lon: float,
+                     address: str, params, result, weather, reason: str = "") -> str:
+    """Fallback chat that works without Gemini, using only computed app data."""
+    msg = (user_message or "").lower()
+    lines = []
+    prefix = "Mình trả lời bằng bộ phân tích nội bộ vì Gemini đang lỗi hoặc hết quota."
+    if reason:
+        prefix += f" Lý do: {reason}."
+    lines.append(prefix)
+
+    if address:
+        lines.append(f"Vị trí đang xét là {address} ({lat:.4f}, {lon:.4f}).")
+
+    if weather and weather.get("current") and any(k in msg for k in ("thời tiết", "mưa", "nhiệt", "gió", "ẩm", "weather")):
+        w = weather["current"]
+        lines.append(
+            f"Thời tiết hiện tại: khoảng {w.get('temp', '?')}°C, gió {w.get('wind', '?')} km/h, "
+            f"độ ẩm {w.get('humidity', '?')}%."
+        )
+        fc = weather.get("forecast") or []
+        if fc:
+            rainy = [d for d in fc[:7] if (d.get("rain_prob") or 0) >= 50]
+            if rainy:
+                days = ", ".join(f"{d.get('date')} ({d.get('rain_prob')}%)" for d in rainy[:3])
+                lines.append(f"Trong 7 ngày tới có khả năng mưa đáng chú ý vào: {days}.")
+            else:
+                lines.append("Dự báo 7 ngày tới chưa thấy ngày nào có xác suất mưa vượt 50%.")
+
+    if result and params:
+        stats_last = result.get("stats_last") or {}
+        stats_first = result.get("stats_first") or {}
+        first_y, last_y = result.get("first_y", "?"), result.get("last_y", "?")
+        m_last = stats_last.get(f"{params.layer}_mean")
+        m_first = stats_first.get(f"{params.layer}_mean")
+        if m_first is not None and m_last is not None:
+            delta = m_last - m_first
+            direction = "tăng" if delta > 0 else "giảm" if delta < 0 else "gần như không đổi"
+            status, _ = layer_status(params.layer, m_last)
+            lines.append(
+                f"Về {params.layer}, giá trị trung bình {direction} từ {fmt_val(params.layer, m_first)} "
+                f"năm {first_y} lên {fmt_val(params.layer, m_last)} năm {last_y} (Δ={delta:+.4f}); "
+                f"đánh giá hiện tại: {status}."
+            )
+            if any(k in msg for k in ("đô thị", "xây dựng", "bê tông", "ndbi")) and params.layer != "NDBI":
+                lines.append("Nếu muốn đánh giá đô thị hóa trực tiếp hơn, hãy chạy thêm lớp NDBI vì NDBI nhạy với bề mặt xây dựng.")
+            if any(k in msg for k in ("cây", "xanh", "trồng", "ndvi")):
+                lines.append("Nếu khu vực có NDVI thấp hoặc LST cao, ưu tiên tăng cây xanh, bóng mát và bề mặt thấm nước.")
+            if any(k in msg for k in ("nóng", "đảo nhiệt", "lst", "nhiệt")):
+                lines.append("Nếu LST cao, cần theo dõi đảo nhiệt đô thị, đặc biệt ở các vùng bề mặt bê tông dày và ít cây xanh.")
+
+        bd = result.get("bar_data") or []
+        if bd and any(k in msg for k in ("so sánh", "vùng nào", "cao nhất", "thấp nhất")):
+            valid = [r for r in bd if r.get("Trị số") is not None]
+            if valid:
+                high = max(valid, key=lambda r: r["Trị số"])
+                low = min(valid, key=lambda r: r["Trị số"])
+                lines.append(
+                    f"So sánh vùng: {high.get('Khu vực')} đang cao nhất ({high.get('Trị số'):.3f}), "
+                    f"còn {low.get('Khu vực')} thấp nhất ({low.get('Trị số'):.3f})."
+                )
+
+    if len(lines) == 1:
+        lines.append("Bạn hãy chạy phân tích hoặc click một điểm trên bản đồ để mình có thêm dữ liệu thời tiết, NDVI, NDBI và LST để trả lời cụ thể hơn.")
+
+    return " ".join(lines)
 
 
 # ─── ACADEMIC AUTO-ANALYSIS ──────────────────────────────────────────────────
@@ -1623,7 +1681,8 @@ def build_beautiful_report_html(
   .hero {{ padding:36px 42px 30px; color:white; background:linear-gradient(135deg,#1e293b,#4f46e5 55%,#0891b2); }}
   .eyebrow {{ font-size:12px; letter-spacing:1.6px; text-transform:uppercase; opacity:.86; font-weight:700; }}
   h1 {{ margin:12px 0 8px; font-size:34px; line-height:1.15; letter-spacing:0; }}
-  .subtitle {{ margin:0; max-width:760px; opacity:.92; }}
+  .subtitle {{ margin:0; max-width:760px; opacity:.96; color:#f8fafc; }}
+  .hero p {{ color:#f8fafc; }}
   .meta {{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:26px; }}
   .meta div {{ border:1px solid rgba(255,255,255,.22); background:rgba(255,255,255,.12); border-radius:8px; padding:12px; }}
   .label {{ display:block; color:#64748b; font-size:11px; text-transform:uppercase; font-weight:700; letter-spacing:.7px; }}
@@ -1720,12 +1779,21 @@ def build_pdf_report(
 
     font_name = "Helvetica"
     bold_font = "Helvetica-Bold"
-    for font_path in (r"C:\Windows\Fonts\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
-        if os.path.exists(font_path):
+    font_candidates = [
+        (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+    ]
+    for regular_path, bold_path in font_candidates:
+        if os.path.exists(regular_path):
             try:
-                pdfmetrics.registerFont(TTFont("AppUnicode", font_path))
+                pdfmetrics.registerFont(TTFont("AppUnicode", regular_path))
                 font_name = "AppUnicode"
-                bold_font = "AppUnicode"
+                if os.path.exists(bold_path):
+                    pdfmetrics.registerFont(TTFont("AppUnicodeBold", bold_path))
+                    bold_font = "AppUnicodeBold"
+                else:
+                    bold_font = "AppUnicode"
                 break
             except Exception:
                 pass

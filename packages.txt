@@ -1,3 +1,4 @@
 g++
 build-essential
 python3-dev
+fonts-dejavu-core
