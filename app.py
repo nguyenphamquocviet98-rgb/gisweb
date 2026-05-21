@@ -173,8 +173,10 @@ def get_db_connection():
     try:
         # Gọi thẳng kết nối đã cấu hình trong Secrets
         conn = st.connection("postgresql", type="sql")
+        st.session_state["db_last_error"] = None
         return conn
-    except:
+    except Exception as e:
+        st.session_state["db_last_error"] = f"Không kết nối được Supabase: {e}"
         return None
 
 def get_query_hash(country, sub_regions, layer, month, years_multi):
@@ -205,7 +207,7 @@ def check_cache_in_db(query_hash):
 def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
     conn = get_db_connection()
     if not conn:
-        return
+        return False
     try:
         stats_json  = json.dumps(stats_dict, ensure_ascii=False)
         sub_regs    = ",".join(params.sub_regions) if params.sub_regions else "All"
@@ -225,8 +227,15 @@ def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
                 "layer": params.layer, "years": years_str, "stats": stats_json, "report": gemini_report
             })
             session.commit()
+            st.session_state["db_last_error"] = None
+            st.session_state["db_save_status"] = "Đã lưu kết quả vào Supabase analysis_cache."
+            return True
     except Exception as e:
-        print("Lỗi lưu cache lên Supabase:", e)
+        err = f"Lỗi lưu cache lên Supabase: {e}"
+        st.session_state["db_last_error"] = err
+        st.session_state["db_save_status"] = err
+        print(err)
+        return False
 
 # ─── GOOGLE EARTH ENGINE INIT ────────────────────────────────────────────────
 def init_gee():
@@ -3583,13 +3592,21 @@ with col_report:
                     stats_to_save = {k: result[k] for k in
                                      ["area_first", "area_last", "stats_first", "stats_last",
                                       "hist_last", "trend_data", "bar_data"]}
-                    save_cache_to_db(st.session_state["current_hash"], params, stats_to_save, report)
-                    st.session_state["pending_db_save"] = False
+                    saved = save_cache_to_db(st.session_state["current_hash"], params, stats_to_save, report)
+                    if saved:
+                        st.session_state["pending_db_save"] = False
             st.rerun(scope="fragment")
 
         _ai_report_fragment()
 
         # ── Academic analysis box (auto-generated) ───────────────────────
+        db_status = st.session_state.get("db_save_status")
+        db_error = st.session_state.get("db_last_error")
+        if db_error:
+            st.warning(db_error)
+        elif db_status:
+            st.success(db_status)
+
         with st.expander("🔬 Phân tích Học thuật Tự động", expanded=False):
             analysis = auto_academic_analysis(
                 params.layer, l_mean_first, l_mean_last, a_high, result["roi_names"]
