@@ -48,13 +48,21 @@ def initialize_earth_engine():
     project_id = os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5")
 
     try:
-        has_service_account = "gcp_service_account" in st.secrets
+        if "gcp_service_account" in st.secrets:
+            service_account_info = st.secrets["gcp_service_account"]
+            has_service_account = True
+        elif all(k in st.secrets for k in ("client_email", "private_key", "project_id")):
+            service_account_info = st.secrets
+            has_service_account = True
+        else:
+            service_account_info = None
+            has_service_account = False
     except Exception:
+        service_account_info = None
         has_service_account = False
 
     if has_service_account:
         try:
-            service_account_info = st.secrets["gcp_service_account"]
             client_email = service_account_info.get("client_email")
             project_id = service_account_info.get("project_id", project_id)
             raw_private_key = str(service_account_info.get("private_key", ""))
