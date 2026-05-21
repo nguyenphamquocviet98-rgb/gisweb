@@ -53,12 +53,12 @@ def initialize_earth_engine():
             
             # FIX: Ép kiểu và sửa lỗi ký tự xuống dòng văn bản '\\n' thành '\n' thực tế
             raw_private_key = service_account_info.get("private_key", "")
-            formatted_private_key = raw_private_key.replace("\\n", "\n")
+            formatted_private_key = raw_private_key.replace("\\n", "\n").strip()
             
             # Extract credentials from service account
             credentials = ee.ServiceAccountCredentials(
                 email=service_account_info.get("client_email"),
-                key_data=service_account_info.get("private_key")
+                key_data=formatted_private_key
             )
             
             # Initialize Earth Engine with service account credentials
@@ -196,6 +196,8 @@ def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
 
 # ─── GOOGLE EARTH ENGINE INIT ────────────────────────────────────────────────
 def init_gee():
+    if ee_initialized:
+        return
     try:
         ee.Initialize(project=CONFIG["project_id"])
     except Exception as e:
