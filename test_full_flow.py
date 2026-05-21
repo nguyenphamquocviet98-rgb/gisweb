@@ -20,7 +20,7 @@ if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
 
 OPENMETEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAkfuP2SmCG42jF6fzyiZPLuToy96xujNk")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 def get_weather_description(weathercode: int) -> str:
     """Chuyển đổi weather code thành mô tả tiếng Việt"""

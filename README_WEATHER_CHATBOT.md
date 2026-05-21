@@ -26,16 +26,16 @@ pip install -r requirements_chatbot.txt
 
 #### **2. Cấu hình API Key**
 
-Mở file `app.py` và thay đổi dòng này:
+Tạo file `.env` ở thư mục gốc dự án và thêm biến môi trường:
 
-```python
-GEMINI_API_KEY = "AIzaSyB9kb4JSKvALXXvsl9CG0knFESlyNdQByA"  # ⚠️ Thay bằng key của bạn
+```env
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
 ```
 
 **Cách lấy Gemini API Key:**
 1. Vào https://aistudio.google.com/apikey
 2. Click "Create API key"
-3. Copy key và paste vào `app.py`
+3. Copy key và paste vào file `.env`. Không commit `.env` lên GitHub.
 
 #### **3. Chạy Server Flask**
 

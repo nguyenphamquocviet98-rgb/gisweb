@@ -137,16 +137,30 @@ try:
 except Exception:
     pass
 # ─── GEMINI MULTI-KEY CONFIGURATION (KEY ROTATION) ───────────────────────────
-# 4 key độc lập — tự động xoay vòng khi 1 key bị hết quota (429 / RESOURCE_EXHAUSTED)
-GEMINI_KEYS_POOL = [
-    os.environ.get("GEMINI_KEY_1", "AIzaSyC_TONxwlQH6a_UWgr9pWho6HsgFtK20H0"),
-    os.environ.get("GEMINI_KEY_2", "AIzaSyAT5934paqNUlDQKGdyBqi7rAkEmLb79J0"),
-    os.environ.get("GEMINI_KEY_3", "AIzaSyAjmPDRLl5sGyIX9jzhR5b3zEb8oCE0RTs"),
-    os.environ.get("GEMINI_KEY_4", "AIzaSyBN7wIH89ikqQWvDWXFIiGUjrl9kMnOIDM"),
-]
+def get_secret_or_env(name: str, default: str = "") -> str:
+    """Read config from Streamlit Secrets first, then environment variables."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+        if "gemini" in st.secrets and name in st.secrets["gemini"]:
+            return str(st.secrets["gemini"][name]).strip()
+    except Exception:
+        pass
+    return os.environ.get(name, default).strip()
 
-# Backward-compat: vẫn giữ biến GEMINI_API_KEY trỏ tới key đầu tiên trong pool
-GEMINI_API_KEY = GEMINI_KEYS_POOL[0]
+
+def load_gemini_keys() -> List[str]:
+    keys = []
+    for name in ("GEMINI_KEY_1", "GEMINI_KEY_2", "GEMINI_KEY_3", "GEMINI_KEY_4", "GEMINI_API_KEY"):
+        key = get_secret_or_env(name)
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+# Keys must be configured in Streamlit Secrets or local .env. Never hardcode them.
+GEMINI_KEYS_POOL = load_gemini_keys()
+GEMINI_API_KEY = GEMINI_KEYS_POOL[0] if GEMINI_KEYS_POOL else ""
 
 # Biến toàn cục theo dõi xem đang dùng tới key thứ mấy trong danh sách
 if "current_key_idx" not in st.session_state:
@@ -1176,6 +1190,8 @@ def call_gemini_with_rotation(model_name: str, contents: str, system_instruction
     Gọi Gemini API và tự động xoay vòng qua 4 key trong GEMINI_KEYS_POOL khi 1 key hết quota.
     """
     total_keys = len(GEMINI_KEYS_POOL)
+    if total_keys == 0:
+        raise RuntimeError("Chưa cấu hình Gemini API key trong Streamlit Secrets hoặc biến môi trường.")
 
     for _ in range(total_keys):
         idx = st.session_state.current_key_idx
@@ -2936,6 +2952,9 @@ def call_gemini_vision_on_roi(params, result) -> str:
     )
 
     total_keys = len(GEMINI_KEYS_POOL)
+    if total_keys == 0:
+        return "⚠️ Chưa cấu hình Gemini API key trong Streamlit Secrets hoặc biến môi trường."
+
     last_err = None
     for _ in range(total_keys):
         idx = st.session_state.current_key_idx

@@ -19,8 +19,8 @@ if hasattr(sys.stderr, 'reconfigure'):
 app = Flask(__name__)
 CORS(app)  # Allow CORS for all routes (important for cross-origin frontend communication)
 
-# Load GEMINI API Key from Environment, fallback to working key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAkfuP2SmCG42jF6fzyiZPLuToy96xujNk")
+# Load GEMINI API Key from Environment. Do not hardcode secrets in source code.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 OPENMETEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
 def get_weather_description(weathercode: int) -> str:
