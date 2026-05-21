@@ -6,3 +6,4 @@ geemap
 pandas
 plotly
 reportlab
+pyodbc
