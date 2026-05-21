@@ -1074,6 +1074,8 @@ def get_forecast_weather(lat, lon):
         }
         daily = res.get("daily", {})
         forecast = []
+        if not cw and not daily:
+            return None
         if daily and "time" in daily:
             n = len(daily["time"])
             max_t = daily.get("temperature_2m_max", [])
