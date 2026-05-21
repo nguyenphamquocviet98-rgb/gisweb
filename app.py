@@ -167,75 +167,6 @@ GEMINI_API_KEY = GEMINI_KEYS_POOL[0] if GEMINI_KEYS_POOL else ""
 if "current_key_idx" not in st.session_state:
     st.session_state.current_key_idx = 0
 
-# ─── DATABASE (SUPABASE POSTGRESQL SMART CACHE) ───────────────────────────────
-def get_db_connection():
-    """Khởi tạo kết nối tới Supabase thông qua Streamlit Connections"""
-    try:
-        # Gọi thẳng kết nối đã cấu hình trong Secrets
-        conn = st.connection("postgresql", type="sql")
-        st.session_state["db_last_error"] = None
-        return conn
-    except Exception as e:
-        st.session_state["db_last_error"] = f"Không kết nối được Supabase: {e}"
-        return None
-
-def get_query_hash(country, sub_regions, layer, month, years_multi):
-    raw = f"{country}_{'|'.join(sorted(sub_regions))}_{layer}_{month}_{'|'.join(sorted(years_multi))}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-def check_cache_in_db(query_hash):
-    conn = get_db_connection()
-    if not conn:
-        return None
-    try:
-        # Sử dụng phương thức conn.query của Streamlit kết hợp cú pháp Postgres (chữ thường hoặc viết hoa chuẩn bảng)
-        # Lưu ý: Postgres phân biệt hoa thường, các bảng bạn tạo trên Supabase là chữ thường (search_logs, users, analysis_cache)
-        query = "SELECT statsresultdata, geminireport FROM analysis_cache WHERE queryhash = :hash_val LIMIT 1;"
-        df = conn.query(query, params={"hash_val": query_hash}, ttl=0)
-        
-        if not df.empty:
-            row = df.iloc[0]
-            return {
-                "result": json.loads(row["statsresultdata"]), 
-                "gemini_report": row["geminireport"]
-            }
-        return None
-    except Exception as e:
-        print("Lỗi đọc cache từ Supabase:", e)
-        return None
-
-def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
-    conn = get_db_connection()
-    if not conn:
-        return False
-    try:
-        stats_json  = json.dumps(stats_dict, ensure_ascii=False)
-        sub_regs    = ",".join(params.sub_regions) if params.sub_regions else "All"
-        years_str   = ",".join(params.years_multi)
-        
-        # Thao tác INSERT ghi dữ liệu vào Postgres sử dụng text session từ connection
-        with conn.session as session:
-            from sqlalchemy import text
-            insert_query = text("""
-                INSERT INTO analysis_cache 
-                (queryhash, countryname, subregions, layerindex, analyzedyears, statsresultdata, geminireport)
-                VALUES (:hash, :country, :regs, :layer, :years, :stats, :report)
-                ON CONFLICT (queryhash) DO NOTHING;
-            """)
-            session.execute(insert_query, {
-                "hash": query_hash, "country": params.country, "regs": sub_regs,
-                "layer": params.layer, "years": years_str, "stats": stats_json, "report": gemini_report
-            })
-            session.commit()
-            st.session_state["db_last_error"] = None
-            st.session_state["db_save_status"] = "Đã lưu kết quả vào Supabase analysis_cache."
-            return True
-    except Exception as e:
-        err = f"Lỗi lưu cache lên Supabase: {e}"
-        st.session_state["db_last_error"] = err
-        st.session_state["db_save_status"] = err
-        print(err)
-        return False
 
 # ─── GOOGLE EARTH ENGINE INIT ────────────────────────────────────────────────
 def init_gee():
@@ -490,8 +421,6 @@ def init_session_state():
         "params":              None,
         "result":              None,
         "cached_report":       None,
-        "pending_db_save":     False,
-        "current_hash":        None,
         "display_year":        None,
         "map_mode":            "🗺️ Bản đồ đơn",
         "compare_left":        None,
@@ -1249,9 +1178,7 @@ def generate_timelapse_url(
 
 # ─── GEMINI AI REPORT ────────────────────────────────────────────────────────
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
-
-
-def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None):
+def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None): # This function is kept for fallback
     meta = CONFIG["layer_meta"][layer]
     delta = (last_val or 0) - (first_val or 0)
     direction = "tăng" if delta > 0 else "giảm" if delta < 0 else "gần như không đổi"
@@ -1261,7 +1188,7 @@ def generate_local_report(layer, first_year, last_year, first_val, last_val, hig
     risk_level = "cao" if status == "Cảnh báo" else "trung bình" if status == "Trung bình" else "thấp"
 
     return (
-        f"Báo cáo tự động offline:{reason_text} Tại khu vực {roi_name}, chỉ số {layer} "
+        f"Báo cáo tự động :{reason_text} Tại khu vực {roi_name}, chỉ số {layer} "
         f"đại diện cho {meta['env_context']} trong giai đoạn {first_year}-{last_year} có xu hướng {direction}, "
         f"từ {fmt_val(layer, first_val)} lên {fmt_val(layer, last_val)}, tương ứng mức biến động {delta:+.3f}. "
         f"Trạng thái hiện tại của khu vực được hệ thống phân loại là {status}, với mức rủi ro tổng hợp {risk_level}; "
@@ -1273,10 +1200,8 @@ def generate_local_report(layer, first_year, last_year, first_val, last_val, hig
         f"Về mặt quy hoạch, cần tập trung kiểm soát mở rộng bề mặt không thấm nước, bảo vệ các mảng xanh còn lại, "
         f"tăng hành lang cây xanh ven trục giao thông và bố trí các giải pháp hạ nhiệt đô thị tại những khu vực có mật độ "
         f"xây dựng cao. Đồng thời, kết quả này nên được sử dụng như một lớp dữ liệu cảnh báo sớm để hỗ trợ ra quyết định, "
-        f"không thay thế hoàn toàn khảo sát thực địa. Báo cáo được tạo từ số liệu viễn thám đã tính trong hệ thống và vẫn "
-        f"được lưu vào Supabase cache để lần truy vấn sau có thể tải nhanh hơn."
+        f"không thay thế hoàn toàn khảo sát thực địa. Báo cáo được tạo từ số liệu viễn thám đã tính trong hệ thống."
     )
-
 
 def call_gemini_with_rotation(model_name: str, contents: str, system_instruction: str = None) -> str:
     """
@@ -3247,60 +3172,39 @@ with col_ctrl:
             st.warning("⚠️ Chọn ít nhất 1 năm!")
         else:
             params  = AnalysisParams(country, selected_subregions, layer, month, years_multi)
-            q_hash  = get_query_hash(country, selected_subregions, layer, month, years_multi)
             years_s = sorted(years_multi)
 
-            base_obj    = build_base_objects(params)
-            # OPT: compute ROI bounds 1 lần → cache vào session để mọi map rebuild fit_bounds
+            base_obj = build_base_objects(params)
             _center, _zoom, _bbox = _compute_roi_view(base_obj["geom"])
             st.session_state["map_center"] = _center
             st.session_state["map_zoom"]   = _zoom
             st.session_state["map_bounds"] = _bbox
-            cached_data = check_cache_in_db(q_hash)
 
-            if cached_data:
-                st.toast("⚡ Tải từ Smart Cache trong < 0.1s", icon="⚡")
-                final_result = {**base_obj, **cached_data["result"]}
-                st.session_state.update({
-                    "params": params, "result": final_result,
-                    "cached_report": cached_data["gemini_report"],
-                    "ai_trigger": bool(cached_data["gemini_report"]),
-                    "analyzed": True,
-                    "display_year":    years_s[-1],
-                    "compare_left":    years_s[0],
-                    "compare_right":   years_s[-1],
-                    "map_click_value": None, "last_clicked_coords": None,
-                    "force_zoom": True, "pending_db_save": False,
-                    "current_df_hist": None,
-                })
-            else:
-                with st.spinner("⏳ Đang thu thập dữ liệu GEE..."):
-                    try:
-                        # OPT3: cache RAM theo params — chạy lại cùng params không gọi GEE nữa
-                        stats        = compute_stats_cached(
-                            params.country,
-                            tuple(sorted(params.sub_regions)),
-                            params.layer,
-                            params.month,
-                            tuple(sorted(params.years_multi)),
-                        )
-                        final_result = {**base_obj, **stats}
-                        st.session_state.update({
-                            "params": params, "result": final_result,
-                            "cached_report": None,
-                            "ai_trigger": False,
-                            "analyzed": True,
-                            "display_year":    years_s[-1],
-                            "compare_left":    years_s[0],
-                            "compare_right":   years_s[-1],
-                            "map_click_value": None, "last_clicked_coords": None,
-                            "force_zoom": True,
-                            "current_hash":  q_hash,
-                            "pending_db_save": True,
-                            "current_df_hist": None,
-                        })
-                    except Exception as e:
-                        st.error(f"Lỗi truy xuất GEE: {e}")
+            with st.spinner("⏳ Đang thu thập dữ liệu từ GEE..."):
+                try:
+                    # Dùng @st.cache_data để cache RAM (thay cho Supabase)
+                    stats = compute_stats_cached(
+                        params.country,
+                        tuple(sorted(params.sub_regions)),
+                        params.layer,
+                        params.month,
+                        tuple(sorted(params.years_multi)),
+                    )
+                    final_result = {**base_obj, **stats}
+                    st.session_state.update({
+                        "params": params, "result": final_result,
+                        "cached_report": None,
+                        "ai_trigger": False,
+                        "analyzed": True,
+                        "display_year": years_s[-1],
+                        "compare_left": years_s[0],
+                        "compare_right": years_s[-1],
+                        "map_click_value": None,
+                        "last_clicked_coords": None,
+                        "force_zoom": True,
+                    })
+                except Exception as e:
+                    st.error(f"Lỗi truy xuất GEE: {e}")
 
     st.markdown(
         "<div style='margin-top:8px;padding:10px 12px;"
@@ -3564,16 +3468,10 @@ with col_report:
         @st.fragment
         def _ai_report_fragment():
             cached = st.session_state.get("cached_report")
-            pending = st.session_state.get("pending_db_save")
             ai_trigger = st.session_state.get("ai_trigger", False)
 
             if cached:
-                st.markdown(f"""
-                <div class='ai-report'>
-                    <div class='ai-report-label'>🤖 Báo Cáo Chuyên Sâu — Gemini 2.5</div>
-                    <div class='ai-report-text'>{cached}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"<div class='ai-report'><div class='ai-report-text'>{cached}</div></div>", unsafe_allow_html=True)
                 return
 
             if not ai_trigger:
@@ -3583,29 +3481,12 @@ with col_report:
                 return
 
             with st.spinner("🤖 Gemini AI đang phân tích..."):
-                report = generate_gemini_report(
-                    params.layer, first_y, last_y,
-                    l_mean_first, l_mean_last, a_high, result["roi_names"]
-                )
+                report = generate_gemini_report(params.layer, first_y, last_y, l_mean_first, l_mean_last, a_high, result["roi_names"])
                 st.session_state["cached_report"] = report
-                if pending:
-                    stats_to_save = {k: result[k] for k in
-                                     ["area_first", "area_last", "stats_first", "stats_last",
-                                      "hist_last", "trend_data", "bar_data"]}
-                    saved = save_cache_to_db(st.session_state["current_hash"], params, stats_to_save, report)
-                    if saved:
-                        st.session_state["pending_db_save"] = False
             st.rerun(scope="fragment")
 
         _ai_report_fragment()
 
-        # ── Academic analysis box (auto-generated) ───────────────────────
-        db_status = st.session_state.get("db_save_status")
-        db_error = st.session_state.get("db_last_error")
-        if db_error:
-            st.warning(db_error)
-        elif db_status:
-            st.success(db_status)
 
         with st.expander("🔬 Phân tích Học thuật Tự động", expanded=False):
             analysis = auto_academic_analysis(
