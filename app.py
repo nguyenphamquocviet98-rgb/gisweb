@@ -1185,6 +1185,26 @@ def generate_timelapse_url(
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 
+def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None):
+    meta = CONFIG["layer_meta"][layer]
+    delta = (last_val or 0) - (first_val or 0)
+    direction = "tang" if delta > 0 else "giam" if delta < 0 else "gan nhu khong doi"
+    status, _ = layer_status(layer, last_val)
+    good_context = "tich cuc" if (delta >= 0) == meta["good_high"] else "can theo doi"
+    reason_text = f" Bao cao nay duoc tao bang bo mau noi bo vi Gemini dang loi: {reason}." if reason else ""
+
+    return (
+        f"Bao cao tu dong offline:{reason_text} Tai {roi_name}, chi so {layer} "
+        f"({meta['env_context']}) trong giai doan {first_year}-{last_year} "
+        f"{direction} tu {fmt_val(layer, first_val)} len {fmt_val(layer, last_val)}, "
+        f"chenh lech {delta:+.3f}. Trang thai hien tai duoc danh gia la {status}; "
+        f"xu huong nay {good_context} doi voi quan ly moi truong do thi. "
+        f"Dien tich vung nguy co cao dat khoang {high_area:,.0f} ha, nen uu tien giam sat "
+        f"cac khu vuc co mat do xay dung cao, tang bo sung mang xanh va kiem soat mo rong be mat khong tham nuoc. "
+        f"Ket qua nay duoc tao tu so lieu vien tham da tinh trong he thong va van co the luu vao cache Supabase."
+    )
+
+
 def call_gemini_with_rotation(model_name: str, contents: str, system_instruction: str = None) -> str:
     """
     Gọi Gemini API và tự động xoay vòng qua 4 key trong GEMINI_KEYS_POOL khi 1 key hết quota.
@@ -1270,13 +1290,19 @@ def generate_gemini_report(layer, first_year, last_year, first_val, last_val, hi
 
     err_str = str(last_err or "")
     if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
-        return ("Gemini AI đã hết quota miễn phí hôm nay trên cả 4 key. "
-                "Vui lòng tạo API key mới tại https://aistudio.google.com/apikey "
-                "rồi cập nhật biến GEMINI_KEY_1..4 trong file .env, hoặc đợi 24h để reset quota. "
-                "Trong khi đó, bạn vẫn có thể đọc phần Phân tích Học thuật Tự động ở trên.")
+        return generate_local_report(
+            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
+            "het quota hoac quota free tier bang 0"
+        )
     if "503" in err_str or "UNAVAILABLE" in err_str:
-        return "Gemini AI đang quá tải. Bạn thử lại sau 1-2 phút nhé."
-    return f"Không thể tạo báo cáo tự động do lỗi API: {str(last_err) if last_err else 'unknown'}"
+        return generate_local_report(
+            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
+            "Gemini dang qua tai"
+        )
+    return generate_local_report(
+        layer, first_year, last_year, first_val, last_val, high_area, roi_name,
+        "API key khong hop le hoac chua co quota"
+    )
 
 # ─── AI CHATBOT — context-rich Q&A ───────────────────────────────────────────
 def _build_chat_context(lat, lon, address, params, result, weather):
