@@ -18,4 +18,5 @@ flask
 flask-cors
 setuptools
 wheel
-pyodbc
+sqlalchemy
+psycopg2-binary

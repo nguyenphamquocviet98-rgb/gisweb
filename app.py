@@ -7,7 +7,7 @@
 """
 
 # ─── IMPORTS ─────────────────────────────────────────────────────────────────
-import time, json, os, hashlib, pyodbc, requests, html, re
+import time, json, os, hashlib, requests, html, re
 from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("USE_FOLIUM", "1")  # geemap: chọn folium backend trước khi import
 from dataclasses import dataclass
@@ -152,19 +152,13 @@ GEMINI_API_KEY = GEMINI_KEYS_POOL[0]
 if "current_key_idx" not in st.session_state:
     st.session_state.current_key_idx = 0
 
-# ─── DATABASE (SQL SERVER SMART CACHE) ───────────────────────────────────────
-DB_SERVER = os.environ.get("DB_SERVER", r"LAPTOP-S5A6Q2L5\SQLEXPRESS")
-DB_NAME   = os.environ.get("DB_NAME",   "GIS_Urban_Analysis")
-DB_USER   = os.environ.get("DB_USER",   "sa")
-DB_PASS   = os.environ.get("DB_PASS",   "sa")
-
+# ─── DATABASE (SUPABASE POSTGRESQL SMART CACHE) ───────────────────────────────
 def get_db_connection():
+    """Khởi tạo kết nối tới Supabase thông qua Streamlit Connections"""
     try:
-        conn_str = (f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                    f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
-                    f"UID={DB_USER};PWD={DB_PASS};"
-                    f"Encrypt=yes;TrustServerCertificate=yes;")
-        return pyodbc.connect(conn_str, timeout=3)
+        # Gọi thẳng kết nối đã cấu hình trong Secrets
+        conn = st.connection("postgresql", type="sql")
+        return conn
     except:
         return None
 
@@ -177,40 +171,47 @@ def check_cache_in_db(query_hash):
     if not conn:
         return None
     try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT StatsResultData, GeminiReport FROM Analysis_Cache WHERE QueryHash = ?",
-            (query_hash,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return {"result": json.loads(row[0]), "gemini_report": row[1]}
+        # Sử dụng phương thức conn.query của Streamlit kết hợp cú pháp Postgres (chữ thường hoặc viết hoa chuẩn bảng)
+        # Lưu ý: Postgres phân biệt hoa thường, các bảng bạn tạo trên Supabase là chữ thường (search_logs, users, analysis_cache)
+        query = "SELECT statsresultdata, geminireport FROM analysis_cache WHERE queryhash = :hash_val LIMIT 1;"
+        df = conn.query(query, params={"hash_val": query_hash}, ttl=0)
+        
+        if not df.empty:
+            row = df.iloc[0]
+            return {
+                "result": json.loads(row["statsresultdata"]), 
+                "gemini_report": row["geminireport"]
+            }
         return None
-    except:
+    except Exception as e:
+        print("Lỗi đọc cache từ Supabase:", e)
         return None
-    finally:
-        if conn: conn.close()
 
 def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
     conn = get_db_connection()
     if not conn:
         return
     try:
-        cursor = conn.cursor()
         stats_json  = json.dumps(stats_dict, ensure_ascii=False)
         sub_regs    = ",".join(params.sub_regions) if params.sub_regions else "All"
         years_str   = ",".join(params.years_multi)
-        cursor.execute(
-            """INSERT INTO Analysis_Cache
-               (QueryHash, CountryName, SubRegions, LayerIndex, AnalyzedYears, StatsResultData, GeminiReport)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (query_hash, params.country, sub_regs, params.layer, years_str, stats_json, gemini_report)
-        )
-        conn.commit()
+        
+        # Thao tác INSERT ghi dữ liệu vào Postgres sử dụng text session từ connection
+        with conn.session as session:
+            from sqlalchemy import text
+            insert_query = text("""
+                INSERT INTO analysis_cache 
+                (queryhash, countryname, subregions, layerindex, analyzedyears, statsresultdata, geminireport)
+                VALUES (:hash, :country, :regs, :layer, :years, :stats, :report)
+                ON CONFLICT (queryhash) DO NOTHING;
+            """)
+            session.execute(insert_query, {
+                "hash": query_hash, "country": params.country, "regs": sub_regs,
+                "layer": params.layer, "years": years_str, "stats": stats_json, "report": gemini_report
+            })
+            session.commit()
     except Exception as e:
-        print("Lỗi lưu DB:", e)
-    finally:
-        if conn: conn.close()
+        print("Lỗi lưu cache lên Supabase:", e)
 
 # ─── GOOGLE EARTH ENGINE INIT ────────────────────────────────────────────────
 def init_gee():
