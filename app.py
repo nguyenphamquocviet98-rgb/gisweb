@@ -2,12 +2,14 @@
 ╔══════════════════════════════════════════════════════════════════════╗
 ║   URBAN DYNAMICS INTELLIGENCE PLATFORM  —  v2.0                     ║
 ║   Hệ thống Phân tích & Dự báo Biến động Đô thị Toàn cầu            ║
-║   Powered by: GEE · Streamlit · Scikit-learn · Prophet · Gemini     ║
+║   Powered by: GEE · Streamlit · Scikit-learn · Prophet · AI         ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
 # ─── IMPORTS ─────────────────────────────────────────────────────────────────
-import time, json, os, hashlib, pyodbc, requests
+import time, json, os, hashlib, pyodbc, requests, html, re
+from concurrent.futures import ThreadPoolExecutor
+os.environ.setdefault("USE_FOLIUM", "1")  # geemap: chọn folium backend trước khi import
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -21,6 +23,8 @@ import numpy as np
 from scipy import stats as scipy_stats          # FIX: thêm scipy cho KDE
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 from prophet import Prophet
 import plotly.express as px
 import plotly.graph_objects as go
@@ -33,14 +37,14 @@ from google import genai
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
     layout="wide",
-    page_title="Urban Dynamics Intelligence Platform",
+    page_title="Nền tảng Phân tích Đô thị Thông minh",
     page_icon="🌍",
     initial_sidebar_state="collapsed"
 )
 
 # ─── GLOBAL CONFIG ───────────────────────────────────────────────────────────
 CONFIG = {
-    "project_id": "tphcm-470513",
+    "project_id": os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5"),
     "admin_l1":   "FAO/GAUL/2015/level1",
     "scale":      250,
     "years":      [str(y) for y in range(2018, 2027)],
@@ -69,16 +73,39 @@ CONFIG = {
     },
 }
 
-GEMINI_API_KEY = "AIzaSyCZ3kJj-oKw0oo1Sj9m4-Iezsf1cibynIQ"
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+# ─── GEMINI MULTI-KEY CONFIGURATION (KEY ROTATION) ───────────────────────────
+# 4 key độc lập — tự động xoay vòng khi 1 key bị hết quota (429 / RESOURCE_EXHAUSTED)
+GEMINI_KEYS_POOL = [
+    os.environ.get("GEMINI_KEY_1", "AIzaSyC_TONxwlQH6a_UWgr9pWho6HsgFtK20H0"),
+    os.environ.get("GEMINI_KEY_2", "AIzaSyAT5934paqNUlDQKGdyBqi7rAkEmLb79J0"),
+    os.environ.get("GEMINI_KEY_3", "AIzaSyAjmPDRLl5sGyIX9jzhR5b3zEb8oCE0RTs"),
+    os.environ.get("GEMINI_KEY_4", "AIzaSyBN7wIH89ikqQWvDWXFIiGUjrl9kMnOIDM"),
+]
+
+# Backward-compat: vẫn giữ biến GEMINI_API_KEY trỏ tới key đầu tiên trong pool
+GEMINI_API_KEY = GEMINI_KEYS_POOL[0]
+
+# Biến toàn cục theo dõi xem đang dùng tới key thứ mấy trong danh sách
+if "current_key_idx" not in st.session_state:
+    st.session_state.current_key_idx = 0
 
 # ─── DATABASE (SQL SERVER SMART CACHE) ───────────────────────────────────────
-DB_SERVER = r'VIET'
-DB_NAME   = 'GIS_Urban_Analysis'
+DB_SERVER = os.environ.get("DB_SERVER", r"LAPTOP-S5A6Q2L5\SQLEXPRESS")
+DB_NAME   = os.environ.get("DB_NAME",   "GIS_Urban_Analysis")
+DB_USER   = os.environ.get("DB_USER",   "sa")
+DB_PASS   = os.environ.get("DB_PASS",   "sa")
 
 def get_db_connection():
     try:
         conn_str = (f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-                    f"SERVER={DB_SERVER};DATABASE={DB_NAME};Trusted_Connection=yes;")
+                    f"SERVER={DB_SERVER};DATABASE={DB_NAME};"
+                    f"UID={DB_USER};PWD={DB_PASS};"
+                    f"Encrypt=yes;TrustServerCertificate=yes;")
         return pyodbc.connect(conn_str, timeout=3)
     except:
         return None
@@ -144,21 +171,21 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 
 :root {
-  --primary:   #6366f1;
-  --primary-2: #818cf8;
-  --accent:    #06b6d4;
-  --success:   #10b981;
-  --warning:   #f59e0b;
-  --danger:    #ef4444;
-  --bg:        #070b14;
-  --bg-2:      #0d1526;
-  --surface:   rgba(255,255,255,0.045);
-  --surface-2: rgba(255,255,255,0.08);
-  --border:    rgba(255,255,255,0.09);
-  --text:      #e2e8f0;
+  --primary:   #4f46e5;
+  --primary-2: #6366f1;
+  --accent:    #0891b2;
+  --success:   #059669;
+  --warning:   #d97706;
+  --danger:    #dc2626;
+  --bg:        #ffffff;
+  --bg-2:      #f1f5f9;
+  --surface:   #ffffff;
+  --surface-2: #f8fafc;
+  --border:    #e2e8f0;
+  --text:      #0f172a;
   --muted:     #64748b;
   --radius:    14px;
-  --glow:      0 0 20px rgba(99,102,241,0.35);
+  --glow:      0 0 0 3px rgba(79,70,229,0.12);
 }
 
 html, body, [class*="css"] {
@@ -172,7 +199,7 @@ html, body, [class*="css"] {
 }
 
 div.block-container {
-  padding: 1.2rem 2rem 2.5rem;
+  padding: 0.8rem 1.2rem 1.6rem;
   max-width: 100%;
 }
 
@@ -265,10 +292,10 @@ div[data-testid="stButton"] button[kind="primary"]:hover {
 }
 
 /* ── KPI Grid ────────────────────────────────── */
-.kpi-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 10px; margin-bottom: 16px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; margin-bottom: 12px; }
 .kpi-card {
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 14px 16px;
+  border-radius: 10px; padding: 10px 12px;
   transition: all 0.2s; position: relative; overflow: hidden;
 }
 .kpi-card::before {
@@ -280,9 +307,9 @@ div[data-testid="stButton"] button[kind="primary"]:hover {
   box-shadow: 0 4px 20px rgba(99,102,241,0.12);
   transform: translateY(-1px);
 }
-.kpi-title { font-size: 10px; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.6px; margin-bottom: 5px; }
-.kpi-value { font-size: 22px; font-weight: 700; color: var(--text); font-family: 'JetBrains Mono', monospace; }
-.kpi-delta { font-size: 11px; font-weight: 600; margin-top: 4px; }
+.kpi-title { font-size: 9.5px; color: var(--muted); text-transform: uppercase; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 4px; }
+.kpi-value { font-size: 19px; font-weight: 700; color: var(--text); font-family: 'JetBrains Mono', monospace; line-height: 1.1; }
+.kpi-delta { font-size: 10.5px; font-weight: 600; margin-top: 3px; }
 .kpi-delta.pos { color: var(--success); }
 .kpi-delta.neg { color: var(--danger); }
 
@@ -290,17 +317,22 @@ div[data-testid="stButton"] button[kind="primary"]:hover {
 .ai-report {
   background: linear-gradient(145deg, rgba(99,102,241,0.06), rgba(6,182,212,0.04));
   border: 1px solid rgba(99,102,241,0.2);
-  border-radius: 14px; padding: 18px 20px;
-  margin-bottom: 18px;
+  border-radius: 14px; padding: 14px 16px;
+  margin-bottom: 14px;
   border-left: 3px solid var(--primary);
+  max-height: 260px;
+  overflow-y: auto;
 }
 .ai-report-label {
   font-size: 10px; color: var(--primary-2); font-weight: 800;
-  text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px;
+  text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;
   display: flex; align-items: center; gap: 6px;
+  position: sticky; top: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.85));
+  padding-bottom: 4px;
 }
 .ai-report-text {
-  font-size: 13.5px; line-height: 1.8; color: #94a3b8; text-align: justify;
+  font-size: 12.5px; line-height: 1.65; color: #334155; text-align: justify;
 }
 
 /* ── Academic Analysis Boxes ─────────────────── */
@@ -311,7 +343,7 @@ div[data-testid="stButton"] button[kind="primary"]:hover {
 .analysis-row {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 8px 0; border-bottom: 1px solid var(--border);
-  font-size: 12.5px; line-height: 1.6; color: #94a3b8;
+  font-size: 12.5px; line-height: 1.6; color: #334155;
 }
 .analysis-row:last-child { border-bottom: none; }
 .analysis-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
@@ -353,7 +385,7 @@ div[data-testid="stVerticalBlock"] > div[data-testid="stVerticalBlock"] > div[da
 PD = dict(
     plot_bgcolor="rgba(0,0,0,0)",
     paper_bgcolor="rgba(0,0,0,0)",
-    font_color="#94a3b8",
+    font_color="#334155",
     font_family="'Space Grotesk', sans-serif",
 )
 
@@ -390,6 +422,7 @@ def init_session_state():
         "map_zoom":            6,
         "force_zoom":          False,
         "current_df_hist":     None,
+        "ai_trigger":          False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -506,39 +539,423 @@ def build_base_objects(params: AnalysisParams):
     }
 
 def compute_stats(params: AnalysisParams, base: dict):
-    geom, roi   = base["geom"], base["roi"]
+    """
+    OPT2: Gộp toàn bộ reduceRegion vào 1 ee.Dictionary.getInfo() duy nhất.
+    Trước: 7+N+K calls tuần tự / song song. Sau: 1 server roundtrip.
+    """
+    geom, roi = base["geom"], base["roi"]
     first_y, last_y = base["first_y"], base["last_y"]
     year_data, years = base["year_data"], base["years"]
+    layer = params.layer
+    SCALE = CONFIG["scale"]
 
-    trend_data = []
-    for y in years:
-        val = (year_data[y]["image"].select(params.layer)
-               .reduceRegion(reducer=ee.Reducer.mean(), geometry=geom,
-                             scale=CONFIG["scale"] * 4, maxPixels=1e13, tileScale=4, bestEffort=True)
-               .getInfo().get(params.layer))
-        if val is not None:
-            trend_data.append({"Năm": y, "Trị số": val})
+    def _trend_num(y):
+        return (year_data[y]["image"].select(layer)
+                .reduceRegion(reducer=ee.Reducer.mean(), geometry=geom,
+                              scale=SCALE * 4, maxPixels=1e13, tileScale=4, bestEffort=True)
+                .get(layer))
 
-    bar_data = []
-    if params.sub_regions and len(params.sub_regions) >= 2:
-        for reg in params.sub_regions:
-            val = (year_data[last_y]["image"].select(params.layer)
-                   .reduceRegion(reducer=ee.Reducer.mean(),
-                                 geometry=roi.filter(ee.Filter.eq("ADM1_NAME", reg)).geometry(),
-                                 scale=CONFIG["scale"] * 2, maxPixels=1e13, tileScale=4, bestEffort=True)
-                   .getInfo().get(params.layer))
-            if val is not None:
-                bar_data.append({"Khu vực": reg, "Trị số": val})
+    def _bar_num(r):
+        return (year_data[last_y]["image"].select(layer)
+                .reduceRegion(reducer=ee.Reducer.mean(),
+                              geometry=roi.filter(ee.Filter.eq("ADM1_NAME", r)).geometry(),
+                              scale=SCALE * 2, maxPixels=1e13, tileScale=4, bestEffort=True)
+                .get(layer))
+
+    def _area_dict(class_img):
+        return (ee.Image.pixelArea().divide(10000).addBands(class_img)
+                .reduceRegion(reducer=ee.Reducer.sum().group(groupField=1),
+                              geometry=geom, scale=SCALE * 2,
+                              maxPixels=1e13, tileScale=4, bestEffort=True))
+
+    def _stats_dict(img):
+        return (img.select(layer)
+                .reduceRegion(reducer=ee.Reducer.mean()
+                              .combine(ee.Reducer.min(), sharedInputs=True)
+                              .combine(ee.Reducer.max(), sharedInputs=True),
+                              geometry=geom, scale=SCALE * 2,
+                              maxPixels=1e13, tileScale=4, bestEffort=True))
+
+    def _hist_dict(img):
+        return (img.select(layer)
+                .reduceRegion(reducer=ee.Reducer.histogram(20),
+                              geometry=geom, scale=SCALE * 4,
+                              maxPixels=1e13, tileScale=4, bestEffort=True))
+
+    do_bar = bool(params.sub_regions) and len(params.sub_regions) >= 2
+    bar_regs = params.sub_regions if do_bar else []
+
+    # ⚡ Strategy 1: gộp tất cả vào 1 Dictionary.getInfo() — nhanh nhất nhưng có thể timeout
+    # khi ROI lớn (toàn quốc). Strategy 2 (fallback): chia 7+N+K calls song song với ThreadPool.
+    def _try_combined():
+        payload = ee.Dictionary({
+            "trends":      ee.List([_trend_num(y) for y in years]),
+            "bars":        ee.List([_bar_num(r) for r in bar_regs]),
+            "area_first":  _area_dict(year_data[first_y]["class"]),
+            "area_last":   _area_dict(year_data[last_y]["class"]),
+            "stats_first": _stats_dict(year_data[first_y]["image"]),
+            "stats_last":  _stats_dict(year_data[last_y]["image"]),
+            "hist_last":   _hist_dict(year_data[last_y]["image"]),
+        })
+        raw = payload.getInfo()
+        trend_data = [{"Năm": y, "Trị số": v}
+                      for y, v in zip(years, raw["trends"]) if v is not None]
+        bar_data   = [{"Khu vực": r, "Trị số": v}
+                      for r, v in zip(bar_regs, raw["bars"]) if v is not None]
+        return {
+            "area_first":  raw["area_first"].get("groups", []),
+            "area_last":   raw["area_last"].get("groups", []),
+            "stats_first": raw["stats_first"],
+            "stats_last":  raw["stats_last"],
+            "hist_last":   raw["hist_last"].get(layer, {}),
+            "trend_data":  trend_data,
+            "bar_data":    bar_data,
+        }
+
+    def _fallback_parallel():
+        def _t(y):
+            try: return y, _trend_num(y).getInfo()
+            except Exception: return y, None
+        def _b(r):
+            try: return r, _bar_num(r).getInfo()
+            except Exception: return r, None
+        def _safe(fn):
+            try: return fn.getInfo()
+            except Exception: return {}
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            fts = [pool.submit(_t, y) for y in years]
+            fbs = [pool.submit(_b, r) for r in bar_regs]
+            fA1 = pool.submit(_safe, _area_dict(year_data[first_y]["class"]))
+            fA2 = pool.submit(_safe, _area_dict(year_data[last_y]["class"]))
+            fS1 = pool.submit(_safe, _stats_dict(year_data[first_y]["image"]))
+            fS2 = pool.submit(_safe, _stats_dict(year_data[last_y]["image"]))
+            fH  = pool.submit(_safe, _hist_dict(year_data[last_y]["image"]))
+            trend_data = [{"Năm": y, "Trị số": v} for y, v in (f.result() for f in fts) if v is not None]
+            bar_data   = [{"Khu vực": r, "Trị số": v} for r, v in (f.result() for f in fbs) if v is not None]
+            return {
+                "area_first":  fA1.result().get("groups", []),
+                "area_last":   fA2.result().get("groups", []),
+                "stats_first": fS1.result(),
+                "stats_last":  fS2.result(),
+                "hist_last":   fH.result().get(layer, {}),
+                "trend_data":  trend_data,
+                "bar_data":    bar_data,
+            }
+
+    try:
+        return _try_combined()
+    except Exception as e:
+        msg = str(e).lower()
+        if "timed out" in msg or "timeout" in msg or "deadline" in msg or "memory" in msg:
+            # ROI quá lớn → chia nhỏ chạy song song
+            return _fallback_parallel()
+        raise
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_stats_cached(country: str, sub_regions_tuple: tuple, layer: str,
+                         month: str, years_tuple: tuple) -> dict:
+    """
+    OPT3: cache trong session Streamlit (RAM). Trả về stats đã serialize được.
+    Khi user nhấn 🚀 lại cùng params → lấy ngay từ RAM, không gọi GEE / SQL.
+    """
+    p = AnalysisParams(country, list(sub_regions_tuple), layer, month, list(years_tuple))
+    base = build_base_objects(p)
+    return compute_stats(p, base)
+
+# ─── AI FORECAST: LAND USE 2030/2035 ─────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_area_history(country: str, sub_regions_tuple: tuple,
+                       layer: str, month: str) -> pd.DataFrame:
+    """
+    Fetch diện tích từng class qua TẤT CẢ CONFIG['years'] (2018-2026) song song.
+    Cache 1h để Prophet refit không cần GEE lại.
+    """
+    p_full = AnalysisParams(country, list(sub_regions_tuple), layer, month,
+                            list(CONFIG["years"]))
+    base = build_base_objects(p_full)
+
+    def _one_year(y):
+        try:
+            groups = get_area_groups(base["year_data"][y]["class"],
+                                     base["geom"], CONFIG["scale"])
+            return {"year": int(y),
+                    "class_1": extract_area(groups, 1),
+                    "class_2": extract_area(groups, 2),
+                    "class_3": extract_area(groups, 3),
+                    "class_4": extract_area(groups, 4)}
+        except Exception:
+            return {"year": int(y),
+                    "class_1": None, "class_2": None,
+                    "class_3": None, "class_4": None}
+
+    with ThreadPoolExecutor(max_workers=min(9, len(CONFIG["years"]))) as pool:
+        rows = list(pool.map(_one_year, CONFIG["years"]))
+    return pd.DataFrame(rows).sort_values("year").reset_index(drop=True)
+
+
+# ─── AI: URBAN RISK SCORE 0–100 ──────────────────────────────────────────────
+def compute_risk_score(result: dict, params) -> dict:
+    """
+    Composite risk score 0–100, layer-aware.
+    3 components:
+      - Hiện trạng (40%): giá trị trung bình hiện tại có gần ngưỡng warn không
+      - Xu hướng (35%): % biến động vs năm đầu, theo hướng "xấu"
+      - Diện tích nguy cơ (25%): % diện tích nằm trong class 3+4
+    """
+    layer = params.layer
+    meta = CONFIG["layer_meta"][layer]
+
+    m_first = (result.get("stats_first") or {}).get(f"{layer}_mean") or 0
+    m_last  = (result.get("stats_last")  or {}).get(f"{layer}_mean") or 0
+    delta = m_last - m_first
+    pct_change = (delta / abs(m_first) * 100) if m_first else 0
+
+    # FIX: bad_classes phụ thuộc layer — NDVI thì class 1+2 mới là "xấu"
+    bad_classes = {"NDVI": (1, 2), "NDBI": (3, 4), "LST": (3, 4)}[layer]
+    area_last = result.get("area_last") or []
+    total = sum(g["sum"] for g in area_last) if area_last else 0
+    high_area = sum(g["sum"] for g in area_last if int(g["group"]) in bad_classes)
+    high_pct = (high_area / total * 100) if total > 0 else 0
+
+    # ── Component 1: Hiện trạng (0-100) — sigmoid-like để giữ độ phân giải ──
+    warn_low, warn_high = meta["warn_low"], meta["warn_high"]
+    if meta["good_high"]:  # NDVI: cao = tốt
+        # m_last = warn_high (0.4) → 0 điểm; = 0 → 100 điểm; < 0 → 100 điểm
+        current_score = max(0, min(100, (warn_high - m_last) / warn_high * 100))
+    else:
+        # NDBI/LST: dùng scale [warn_low - margin, warn_high]
+        # NDBI: warn_low=0.1, warn_high=0.25. Margin trải xuống -0.2 để có discriminate
+        # cho các city có mean ~ -0.1 đến 0
+        scale_lo = warn_low - (warn_high - warn_low) * 2.0  # rộng hơn
+        if m_last <= scale_lo:
+            current_score = 0
+        elif m_last >= warn_high:
+            current_score = 100
+        else:
+            current_score = (m_last - scale_lo) / max(warn_high - scale_lo, 0.01) * 100
+
+    # ── Component 2: Xu hướng (0-100) ────────────────
+    if meta["good_high"]:
+        delta_score = max(0, min(100, -pct_change))
+    else:
+        delta_score = max(0, min(100, pct_change))
+
+    # ── Component 3: % diện tích nguy cơ (0-100) ────────────────
+    area_score = min(100, high_pct * 2)  # 50% diện tích nằm class nguy cơ = 100
+
+    # ── Tổng hợp ──────────────────────────────────────
+    total_score = 0.40 * current_score + 0.35 * delta_score + 0.25 * area_score
+    total_score = max(0, min(100, total_score))
+
+    # ── Cluster (4 mức) ───────────────────────────────
+    if total_score < 25:
+        label, color = "An toàn",         "#059669"
+    elif total_score < 50:
+        label, color = "Cần theo dõi",    "#d97706"
+    elif total_score < 75:
+        label, color = "Cảnh báo",        "#dc2626"
+    else:
+        label, color = "Khẩn cấp",        "#7c2d12"
 
     return {
-        "area_first":   get_area_groups(year_data[first_y]["class"], geom, CONFIG["scale"]),
-        "area_last":    get_area_groups(year_data[last_y]["class"],  geom, CONFIG["scale"]),
-        "stats_first":  get_stats(year_data[first_y]["image"], params.layer, geom, CONFIG["scale"]),
-        "stats_last":   get_stats(year_data[last_y]["image"],  params.layer, geom, CONFIG["scale"]),
-        "hist_last":    get_histogram(year_data[last_y]["image"], params.layer, geom, CONFIG["scale"]),
-        "trend_data":   trend_data,
-        "bar_data":     bar_data,
+        "score": round(total_score, 1),
+        "label": label,
+        "color": color,
+        "components": {
+            "Hiện trạng":        round(current_score, 1),
+            "Xu hướng biến động": round(delta_score, 1),
+            "Diện tích nguy cơ":  round(area_score, 1),
+        },
+        "weights": {
+            "Hiện trạng":         40,
+            "Xu hướng biến động":  35,
+            "Diện tích nguy cơ":   25,
+        },
+        "raw": {
+            "current_value": m_last,
+            "delta": delta,
+            "pct_change": pct_change,
+            "high_pct": high_pct,
+            "high_area_ha": high_area,
+        },
     }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_per_region_risk(country: str, sub_regions_tuple: tuple,
+                             layer: str, month: str,
+                             years_tuple: tuple) -> list:
+    """
+    Tính risk score per-region khi user chọn ≥ 2 vùng.
+    Parallel GEE calls cho first-year + last-year mean của mỗi vùng.
+    """
+    if len(sub_regions_tuple) < 2:
+        return []
+    p = AnalysisParams(country, list(sub_regions_tuple), layer, month, list(years_tuple))
+    base = build_base_objects(p)
+    years_sorted = sorted(years_tuple)
+    first_y, last_y = years_sorted[0], years_sorted[-1]
+    meta = CONFIG["layer_meta"][layer]
+
+    def _region(reg):
+        try:
+            geom = base["roi"].filter(ee.Filter.eq("ADM1_NAME", reg)).geometry()
+            m_first = (base["year_data"][first_y]["image"].select(layer)
+                       .reduceRegion(reducer=ee.Reducer.mean(), geometry=geom,
+                                     scale=CONFIG["scale"] * 4, maxPixels=1e13,
+                                     tileScale=4, bestEffort=True).getInfo().get(layer))
+            m_last = (base["year_data"][last_y]["image"].select(layer)
+                      .reduceRegion(reducer=ee.Reducer.mean(), geometry=geom,
+                                    scale=CONFIG["scale"] * 4, maxPixels=1e13,
+                                    tileScale=4, bestEffort=True).getInfo().get(layer))
+            if m_first is None or m_last is None:
+                return None
+            delta = m_last - m_first
+            pct = (delta / abs(m_first) * 100) if m_first else 0
+            warn_low, warn_high = meta["warn_low"], meta["warn_high"]
+            if meta["good_high"]:
+                cur = (warn_high - m_last) / max(warn_high, 0.01) * 100
+                dlt = -pct
+            else:
+                scale_lo = warn_low - (warn_high - warn_low) * 2.0
+                if m_last <= scale_lo:
+                    cur = 0
+                elif m_last >= warn_high:
+                    cur = 100
+                else:
+                    cur = (m_last - scale_lo) / max(warn_high - scale_lo, 0.01) * 100
+                dlt = pct
+            cur = max(0, min(100, cur))
+            dlt = max(0, min(100, dlt))
+            score = 0.50 * cur + 0.50 * dlt    # bỏ component diện tích vì cần thêm GEE
+            score = max(0, min(100, score))
+            return {
+                "region": reg,
+                "score":  round(score, 1),
+                "mean_first": m_first, "mean_last": m_last,
+                "delta": delta, "pct_change": pct,
+                "current_component": round(cur, 1),
+                "delta_component":   round(dlt, 1),
+            }
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(8, len(sub_regions_tuple))) as pool:
+        rows = list(pool.map(_region, sub_regions_tuple))
+    return [r for r in rows if r is not None]
+
+
+def evaluate_prophet_series(years: list, values: list, test_size: int = 2) -> dict:
+    """
+    Đánh giá độ chính xác Prophet bằng train/test split.
+    Train trên (n - test_size) năm đầu, test trên test_size năm cuối.
+    Trả về dict {MAPE, RMSE, MAE, n_train, n_test} hoặc {} nếu không đủ data.
+    """
+    n = len(years)
+    if n < 5 or test_size < 1 or test_size >= n - 2:
+        return {}
+    try:
+        years_arr = list(years)
+        vals_arr  = list(values)
+        # Lọc None / NaN
+        clean = [(y, v) for y, v in zip(years_arr, vals_arr) if v is not None and not pd.isna(v)]
+        if len(clean) < 5:
+            return {}
+        years_arr = [c[0] for c in clean]
+        vals_arr  = [c[1] for c in clean]
+
+        train_years, test_years = years_arr[:-test_size], years_arr[-test_size:]
+        train_vals,  test_vals  = vals_arr[:-test_size],  vals_arr[-test_size:]
+
+        df_train = pd.DataFrame({
+            "ds": pd.to_datetime([str(y) for y in train_years], format="%Y"),
+            "y":  train_vals,
+        })
+        m = Prophet(yearly_seasonality=False, weekly_seasonality=False,
+                    daily_seasonality=False, interval_width=0.85)
+        m.fit(df_train)
+
+        future = pd.DataFrame({
+            "ds": pd.to_datetime([str(y) for y in test_years], format="%Y"),
+        })
+        fc = m.predict(future)
+        y_pred = fc["yhat"].values
+        y_true = np.array(test_vals, dtype=float)
+
+        # Skip zero-y for MAPE
+        nonzero = y_true != 0
+        if nonzero.any():
+            mape = float(np.mean(np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero])) * 100)
+        else:
+            mape = None
+        rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+        mae  = float(np.mean(np.abs(y_true - y_pred)))
+
+        return {
+            "MAPE":    mape,
+            "RMSE":    rmse,
+            "MAE":     mae,
+            "n_train": len(train_years),
+            "n_test":  len(test_years),
+            "test_years":  test_years,
+            "y_true":  list(y_true),
+            "y_pred":  list(y_pred),
+        }
+    except Exception:
+        return {}
+
+
+def forecast_land_use(df_hist: pd.DataFrame,
+                      target_years=(2030, 2035)) -> dict:
+    """
+    Prophet riêng cho từng class. Trả về:
+      {2030: {class_1: ha, class_2: ha, ..., class_1_lo, class_1_hi, ...}, 2035: {...}}
+    + 'series': dict {class_X: DataFrame(year, yhat, yhat_lower, yhat_upper)} cho line chart.
+    """
+    out = {y: {} for y in target_years}
+    series = {}
+    eval_metrics = {}
+    last_hist_year = int(df_hist["year"].max())
+    horizon_max = max(target_years)
+
+    for cls in ["class_1", "class_2", "class_3", "class_4"]:
+        sub = df_hist[["year", cls]].dropna()
+        if len(sub) < 3:
+            series[cls] = None
+            continue
+
+        # ── Backtest: train trên N-2, test trên 2 năm cuối ──────────
+        eval_metrics[cls] = evaluate_prophet_series(
+            years=sub["year"].tolist(),
+            values=sub[cls].tolist(),
+            test_size=2,
+        )
+
+        # ── Full fit + forecast tới horizon ─────────────────────────
+        ds = pd.to_datetime(sub["year"].astype(str), format="%Y")
+        df_p = pd.DataFrame({"ds": ds, "y": sub[cls].values})
+        m = Prophet(yearly_seasonality=False, weekly_seasonality=False,
+                    daily_seasonality=False, interval_width=0.85)
+        m.fit(df_p)
+        periods = horizon_max - last_hist_year
+        future = m.make_future_dataframe(periods=periods, freq="YS")
+        fc = m.predict(future)
+        fc["year"] = fc["ds"].dt.year
+        # Clip negative areas
+        fc["yhat"]       = fc["yhat"].clip(lower=0)
+        fc["yhat_lower"] = fc["yhat_lower"].clip(lower=0)
+        fc["yhat_upper"] = fc["yhat_upper"].clip(lower=0)
+        series[cls] = fc[["year", "yhat", "yhat_lower", "yhat_upper"]].copy()
+        for y in target_years:
+            row = fc[fc["year"] == y]
+            if not row.empty:
+                out[y][cls]            = float(row["yhat"].iloc[0])
+                out[y][cls + "_lo"]    = float(row["yhat_lower"].iloc[0])
+                out[y][cls + "_hi"]    = float(row["yhat_upper"].iloc[0])
+    out["series"] = series
+    out["eval_metrics"]   = eval_metrics
+    out["last_hist_year"] = last_hist_year
+    return out
 
 # ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 def fmt_val(layer, v):
@@ -624,37 +1041,40 @@ def get_three_indices(lat, lon, year, month):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_full_history_at_point(lat, lon, month):
-    """FIX: dùng ee.FeatureCollection.map() để batch toàn bộ years trong 1 GEE call."""
+    """
+    Batch toàn bộ years trong 1 GEE call.
+    FIX: chống fail toàn batch khi 1 năm bị thiếu ảnh — chuyển sang per-year parallel với try/except.
+    """
     point = ee.Geometry.Point([lon, lat])
+    start_radius = point.buffer(30)  # buffer 30m để chắc chắn có pixel khi reduceRegion
 
-    def get_year_val(y_str):
-        start  = ee.Date.fromYMD(ee.Number.parse(y_str), int(month), 1)
-        img_s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-                  .filterBounds(point).filterDate(start, start.advance(3, "month"))
-                  .map(mask_s2).median())
-        img_l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-                  .filterBounds(point).filterDate(start, start.advance(3, "month"))
-                  .map(mask_l8).median())
-        combined = ee.Image().addBands([
-            img_s2.normalizedDifference(["B8", "B4"]).rename("NDVI"),
-            img_s2.normalizedDifference(["B11", "B8"]).rename("NDBI"),
-            img_l8.select("ST_B10").multiply(0.00341802).add(149.0).subtract(273.15).rename("LST"),
-        ])
-        vals = combined.reduceRegion(reducer=ee.Reducer.first(), geometry=point, scale=10)
-        return ee.Feature(None, {"Năm": y_str, "NDVI": vals.get("NDVI"),
-                                 "NDBI": vals.get("NDBI"), "LST": vals.get("LST")})
+    def _fetch_year(y_str):
+        try:
+            start = ee.Date.fromYMD(int(y_str), int(month), 1)
+            img_s2 = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                      .filterBounds(point).filterDate(start, start.advance(3, "month"))
+                      .map(mask_s2).median())
+            img_l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                      .filterBounds(point).filterDate(start, start.advance(3, "month"))
+                      .map(mask_l8).median())
+            ndvi = img_s2.normalizedDifference(["B8", "B4"]).rename("NDVI")
+            ndbi = img_s2.normalizedDifference(["B11", "B8"]).rename("NDBI")
+            lst  = (img_l8.select("ST_B10").multiply(0.00341802)
+                          .add(149.0).subtract(273.15).rename("LST"))
+            combined = ee.Image.cat([ndvi, ndbi, lst])
+            vals = combined.reduceRegion(reducer=ee.Reducer.mean(),
+                                         geometry=start_radius, scale=30,
+                                         maxPixels=1e9, bestEffort=True).getInfo()
+            return {"Năm": y_str,
+                    "NDVI": vals.get("NDVI"),
+                    "NDBI": vals.get("NDBI"),
+                    "LST":  vals.get("LST")}
+        except Exception:
+            return {"Năm": y_str, "NDVI": None, "NDBI": None, "LST": None}
 
-    try:
-        fc = ee.FeatureCollection(ee.List(CONFIG["years"]).map(get_year_val))
-        rows = fc.getInfo().get("features", [])
-        return pd.DataFrame([{
-            "Năm": f["properties"]["Năm"],
-            "NDVI": f["properties"].get("NDVI"),
-            "NDBI": f["properties"].get("NDBI"),
-            "LST":  f["properties"].get("LST"),
-        } for f in rows])
-    except:
-        return pd.DataFrame()
+    with ThreadPoolExecutor(max_workers=min(9, len(CONFIG["years"]))) as pool:
+        rows = list(pool.map(_fetch_year, CONFIG["years"]))
+    return pd.DataFrame(rows)
 
 # ─── TIMELAPSE (FIX: không dùng AnalysisParams để tránh cache crash) ─────────
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -692,23 +1112,214 @@ def generate_timelapse_url(
         return None
 
 # ─── GEMINI AI REPORT ────────────────────────────────────────────────────────
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+
+def call_gemini_with_rotation(model_name: str, contents: str, system_instruction: str = None) -> str:
+    """
+    Gọi Gemini API và tự động xoay vòng qua 4 key trong GEMINI_KEYS_POOL khi 1 key hết quota.
+    """
+    total_keys = len(GEMINI_KEYS_POOL)
+
+    for _ in range(total_keys):
+        idx = st.session_state.current_key_idx
+        current_key = GEMINI_KEYS_POOL[idx]
+
+        try:
+            client = genai.Client(api_key=current_key)
+
+            config_params = {}
+            if system_instruction:
+                config_params["system_instruction"] = system_instruction
+
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=genai.types.GenerateContentConfig(**config_params) if config_params else None,
+            )
+
+            if response and response.text:
+                return response.text
+
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+                next_idx = (idx + 1) % total_keys
+                st.session_state.current_key_idx = next_idx
+                print(f"[Key Rotation] Key index {idx} bị cạn quota. Chuyển sang Key index {next_idx}...")
+                time.sleep(0.5)
+                continue
+            else:
+                raise e
+
+    raise RuntimeError("Tất cả 4 API Keys của bạn đều đã hết hạn mức Quota trong phút/ngày này!")
+
+
 def generate_gemini_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name):
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        meta = CONFIG["layer_meta"][layer]
-        prompt = (
-            f"Viết 1 đoạn báo cáo khoa học (khoảng 160 chữ, tiếng Việt) về {roi_name} "
-            f"trong giai đoạn {first_year}–{last_year}. "
-            f"Chỉ số viễn thám {layer} ({meta['env_context']}) thay đổi từ {first_val:.3f} sang {last_val:.3f}. "
-            f"Diện tích vùng nguy cơ cao: {high_area:,.0f} Ha. "
-            f"Viết theo phong cách học thuật: nêu xu hướng, phân tích nguyên nhân, "
-            f"cảnh báo môi trường cụ thể, đề xuất quy hoạch đô thị bền vững. "
-            f"Không dùng gạch đầu dòng. Không dùng Markdown."
-        )
-        response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-        return response.text
-    except Exception as e:
-        return f"Không thể kết nối Gemini AI: {e}"
+    meta = CONFIG["layer_meta"][layer]
+    prompt = (
+        f"Viết 1 đoạn báo cáo khoa học (khoảng 160 chữ, tiếng Việt) về {roi_name} "
+        f"trong giai đoạn {first_year}–{last_year}. "
+        f"Chỉ số viễn thám {layer} ({meta['env_context']}) thay đổi từ {first_val:.3f} sang {last_val:.3f}. "
+        f"Diện tích vùng nguy cơ cao: {high_area:,.0f} Ha. "
+        f"Viết theo phong cách học thuật: nêu xu hướng, phân tích nguyên nhân, "
+        f"cảnh báo môi trường cụ thể, đề xuất quy hoạch đô thị bền vững. "
+        f"Không dùng gạch đầu dòng. Không dùng Markdown."
+    )
+    last_err = None
+    for model in GEMINI_MODELS:
+        try:
+            report_text = call_gemini_with_rotation(
+                model_name=model,
+                contents=prompt,
+                system_instruction="You are an expert in Urban Dynamics and Remote Sensing. Provide responses in Vietnamese.",
+            )
+            if report_text:
+                return report_text
+        except Exception as e:
+            last_err = e
+            msg = str(e).upper()
+            transient = any(t in msg for t in ("503", "UNAVAILABLE", "DEADLINE_EXCEEDED"))
+            if transient:
+                continue
+            break
+
+    err_str = str(last_err or "")
+    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
+        return ("Gemini AI đã hết quota miễn phí hôm nay trên cả 4 key. "
+                "Vui lòng tạo API key mới tại https://aistudio.google.com/apikey "
+                "rồi cập nhật biến GEMINI_KEY_1..4 trong file .env, hoặc đợi 24h để reset quota. "
+                "Trong khi đó, bạn vẫn có thể đọc phần Phân tích Học thuật Tự động ở trên.")
+    if "503" in err_str or "UNAVAILABLE" in err_str:
+        return "Gemini AI đang quá tải. Bạn thử lại sau 1-2 phút nhé."
+    return f"Không thể tạo báo cáo tự động do lỗi API: {str(last_err) if last_err else 'unknown'}"
+
+# ─── AI CHATBOT — context-rich Q&A ───────────────────────────────────────────
+def _build_chat_context(lat, lon, address, params, result, weather):
+    parts = [f"📍 Vị trí: {address or 'không rõ'} ({lat:.4f}, {lon:.4f})"]
+
+    if weather and weather.get("current"):
+        w = weather["current"]
+        parts.append("\n🌤️ Thời tiết hiện tại:")
+        parts.append(f"  • Nhiệt độ: {w.get('temp','?')}°C")
+        parts.append(f"  • Gió:     {w.get('wind','?')} km/h")
+        parts.append(f"  • Độ ẩm:   {w.get('humidity','?')}%")
+
+    if weather and weather.get("forecast"):
+        fcs = weather["forecast"][:7]
+        if fcs:
+            parts.append("\n📅 Dự báo 7 ngày tới:")
+            for f in fcs:
+                parts.append(
+                    f"  • {f['date']}: {f.get('min_t','?')}°C–{f.get('max_t','?')}°C, "
+                    f"mưa {f.get('rain_prob','?')}%"
+                )
+
+    if params:
+        parts.append(f"\n📊 Phân tích GIS đang chạy:")
+        parts.append(f"  • Quốc gia: {params.country}")
+        if params.sub_regions:
+            parts.append(f"  • Vùng:     {', '.join(params.sub_regions)}")
+        parts.append(f"  • Chỉ số:   {params.layer}")
+        parts.append(f"  • Tháng:    {params.month}")
+        parts.append(f"  • Các năm:  {', '.join(params.years_multi)}")
+
+    if result:
+        stats_last = result.get("stats_last") or {}
+        stats_first = result.get("stats_first") or {}
+        m_last = stats_last.get(f"{params.layer}_mean") if params else None
+        m_first = stats_first.get(f"{params.layer}_mean") if params else None
+        if m_first is not None and m_last is not None:
+            parts.append(f"\n📈 Số liệu chính ({params.layer}):")
+            parts.append(f"  • Năm {result.get('first_y','?')} mean: {m_first:.4f}")
+            parts.append(f"  • Năm {result.get('last_y','?')} mean: {m_last:.4f}")
+            parts.append(f"  • Δ = {m_last - m_first:+.4f}")
+        # Trend list
+        td = result.get("trend_data") or []
+        if td:
+            tline = ", ".join(f"{r['Năm']}={r['Trị số']:.3f}" for r in td)
+            parts.append(f"  • Chuỗi xu hướng: {tline}")
+        # Region bar data
+        bd = result.get("bar_data") or []
+        if bd:
+            parts.append(f"\n🌐 So sánh vùng (mean năm cuối):")
+            for r in bd:
+                parts.append(f"  • {r['Khu vực']}: {r['Trị số']:.3f}")
+
+    # Click-point indices
+    if address and params:
+        # Click point có dữ liệu NDVI/NDBI/LST trong click_info
+        ci = st.session_state.get("map_click_value") or {}
+        if any(ci.get(k) is not None for k in ("NDVI","NDBI","LST")):
+            parts.append(f"\n📍 Chỉ số tại điểm click:")
+            for k in ("NDVI","NDBI","LST"):
+                v = ci.get(k)
+                if v is not None:
+                    suffix = " °C" if k == "LST" else ""
+                    parts.append(f"  • {k}: {v:.4f}{suffix}")
+
+    return "\n".join(parts)
+
+
+def ai_chat_reply(user_message: str, lat: float, lon: float,
+                  address: str, params, result, weather) -> str:
+    """
+    Gemini chat reply có context phong phú từ data thực tế.
+    Có retry + fallback model như generate_gemini_report.
+    """
+    context = _build_chat_context(lat, lon, address, params, result, weather)
+    prompt = f"""Bạn là chuyên gia GIS môi trường & thời tiết của hệ thống Urban Dynamics Intelligence Platform.
+
+DỮ LIỆU THỰC TẾ (từ Earth Engine + Open-Meteo):
+{context}
+
+NGUYÊN TẮC TRẢ LỜI:
+1. Trả lời ngắn gọn 2-5 câu, tự nhiên, tiếng Việt.
+2. Trích NGUYÊN VĂN con số từ DỮ LIỆU trên — không bịa, không làm tròn quá mức.
+3. Nếu câu hỏi không liên quan môi trường/khí hậu/đô thị/GIS/thời tiết → lịch sự từ chối: "Xin lỗi, tôi chỉ tư vấn về môi trường, đô thị và thời tiết tại địa điểm này."
+4. Dùng 1-2 emoji nhẹ. KHÔNG dùng tiêu đề markdown (#), KHÔNG dùng bullet (-) trừ khi liệt kê ≥3 mục.
+
+Câu hỏi từ người dùng:
+{user_message}
+"""
+    last_err = None
+    for model in GEMINI_MODELS:
+        try:
+            ai_response = call_gemini_with_rotation(
+                model_name=model,
+                contents=prompt,
+            )
+            if ai_response:
+                return ai_response.strip()
+        except Exception as e:
+            last_err = e
+            msg = str(e).upper()
+            transient = any(t in msg for t in ("503", "UNAVAILABLE", "DEADLINE_EXCEEDED"))
+            if transient:
+                continue
+            break
+
+    # Friendly Vietnamese error message
+    err_str = str(last_err or "")
+    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
+        return ("⚠️ **Cả 4 Gemini API key đều đã hết quota free tier hôm nay.**\n\n"
+                "Vui lòng:\n"
+                "- Đợi reset quota (khoảng 24h, tính theo Pacific Time)\n"
+                "- Hoặc cấp Gemini API key mới tại https://aistudio.google.com/apikey "
+                "rồi cập nhật `GEMINI_KEY_1..4` trong `.env`\n"
+                "- Hoặc nâng cấp lên paid tier ở Google Cloud")
+    if "503" in err_str or "UNAVAILABLE" in err_str:
+        return ("⚠️ **Gemini AI đang quá tải.** "
+                "Hệ thống đã thử cả 2 model × 4 key. Bạn thử lại sau 1–2 phút nhé.")
+    if "401" in err_str or "API_KEY_INVALID" in err_str or "API KEY NOT VALID" in err_str.upper():
+        return ("⚠️ **API key Gemini không hợp lệ.** "
+                "Vui lòng kiểm tra `GEMINI_KEY_1..4` trong file `.env`.")
+    if "404" in err_str or "NOT_FOUND" in err_str:
+        return ("⚠️ **Model Gemini không khả dụng.** "
+                "Có thể Google đã đổi tên model. Liên hệ admin cập nhật `GEMINI_MODELS`.")
+    return (f"Trợ lý AI hiện tại đang quá tải, vui lòng thử lại sau ít phút! "
+            f"(Chi tiết: `{type(last_err).__name__ if last_err else 'unknown'}`)")
+
 
 # ─── ACADEMIC AUTO-ANALYSIS ──────────────────────────────────────────────────
 def auto_academic_analysis(layer, first_val, last_val, high_area, roi_name):
@@ -811,26 +1422,224 @@ def render_analysis_box(analysis: dict):
         </div>"""
     st.markdown(f"<div class='analysis-box'>{html_rows}</div>", unsafe_allow_html=True)
 
+def safe_filename(text: str, fallback: str = "bao-cao") -> str:
+    """Tạo tên file an toàn cho nút tải xuống."""
+    value = re.sub(r"[^\w\-]+", "_", str(text or ""), flags=re.UNICODE).strip("_")
+    return value[:80] or fallback
+
+def build_beautiful_report_html(
+    params,
+    result: dict,
+    analysis: dict,
+    ai_report: str,
+    first_y,
+    last_y,
+    l_mean_first,
+    l_mean_last,
+    delta_mean,
+    a_high,
+    status,
+    color_st,
+) -> str:
+    """Dựng báo cáo HTML tự chứa, có thể mở bằng trình duyệt hoặc in ra PDF."""
+    meta = CONFIG["layer_meta"][params.layer]
+    esc = lambda v: html.escape(str(v if v is not None else ""))
+    generated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    roi = result.get("roi_names", "")
+
+    trend_rows = ""
+    for row in result.get("trend_data", []):
+        trend_rows += (
+            f"<tr><td>{esc(row.get('Năm', ''))}</td>"
+            f"<td>{fmt_val(params.layer, row.get('Trị số'))}</td></tr>"
+        )
+
+    class_rows = ""
+    labels = CONFIG["class_labels"][params.layer]
+    palette = CONFIG["vis"][params.layer]["palette"]
+    for idx, label in enumerate(labels, start=1):
+        first_area = extract_area(result.get("area_first"), idx)
+        last_area = extract_area(result.get("area_last"), idx)
+        delta_area = last_area - first_area
+        class_rows += f"""
+        <tr>
+            <td><span class="swatch" style="background:{palette[idx - 1]}"></span>{esc(label)}</td>
+            <td>{first_area:,.0f}</td>
+            <td>{last_area:,.0f}</td>
+            <td class="{'pos' if delta_area >= 0 else 'neg'}">{delta_area:+,.0f}</td>
+        </tr>"""
+
+    region_rows = ""
+    for row in result.get("bar_data", []):
+        region_rows += (
+            f"<tr><td>{esc(row.get('Khu vực', ''))}</td>"
+            f"<td>{fmt_val(params.layer, row.get('Trị số'))}</td></tr>"
+        )
+
+    analysis_rows = "".join(
+        f"<section><h2>{label}</h2><p>{esc(analysis[key])}</p></section>"
+        for key, label in [
+            ("technical", "Phân tích kỹ thuật"),
+            ("plain", "Diễn giải dễ hiểu"),
+            ("significance", "Ý nghĩa thực tế"),
+            ("warning", "Cảnh báo môi trường"),
+            ("recommendation", "Đề xuất quy hoạch"),
+        ]
+    )
+    ai_section = (
+        f"<section><h2>Báo cáo AI Gemini</h2><p>{esc(ai_report)}</p></section>"
+        if ai_report else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Báo cáo {esc(params.layer)} - {esc(roi)}</title>
+<style>
+  :root {{ --primary:#4f46e5; --accent:#0891b2; --text:#0f172a; --muted:#64748b; --border:#e2e8f0; --soft:#f8fafc; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:#eef2f7; color:var(--text); font-family:Arial, Helvetica, sans-serif; line-height:1.6; }}
+  .page {{ width:min(1080px, 100%); margin:28px auto; background:#fff; border:1px solid var(--border); box-shadow:0 24px 70px rgba(15,23,42,.12); }}
+  .hero {{ padding:36px 42px 30px; color:white; background:linear-gradient(135deg,#1e293b,#4f46e5 55%,#0891b2); }}
+  .eyebrow {{ font-size:12px; letter-spacing:1.6px; text-transform:uppercase; opacity:.86; font-weight:700; }}
+  h1 {{ margin:12px 0 8px; font-size:34px; line-height:1.15; letter-spacing:0; }}
+  .subtitle {{ margin:0; max-width:760px; opacity:.92; }}
+  .meta {{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:26px; }}
+  .meta div {{ border:1px solid rgba(255,255,255,.22); background:rgba(255,255,255,.12); border-radius:8px; padding:12px; }}
+  .label {{ display:block; color:#64748b; font-size:11px; text-transform:uppercase; font-weight:700; letter-spacing:.7px; }}
+  .hero .label {{ color:#dbeafe; }}
+  .value {{ display:block; margin-top:4px; font-size:17px; font-weight:800; }}
+  main {{ padding:30px 42px 42px; }}
+  .kpis {{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:24px; }}
+  .kpi {{ border:1px solid var(--border); border-top:4px solid var(--primary); border-radius:8px; padding:14px; background:var(--soft); }}
+  .kpi b {{ display:block; margin-top:8px; font-size:24px; line-height:1.2; }}
+  h2 {{ margin:26px 0 10px; font-size:18px; color:#1e293b; border-bottom:1px solid var(--border); padding-bottom:8px; }}
+  p {{ margin:0 0 12px; color:#334155; text-align:justify; }}
+  table {{ width:100%; border-collapse:collapse; margin:10px 0 18px; font-size:14px; }}
+  th {{ background:#f1f5f9; color:#334155; text-align:left; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }}
+  th, td {{ border:1px solid var(--border); padding:10px 12px; vertical-align:top; }}
+  .swatch {{ display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:8px; vertical-align:-1px; }}
+  .pos {{ color:#059669; font-weight:700; }}
+  .neg {{ color:#dc2626; font-weight:700; }}
+  footer {{ padding:18px 42px; background:#f8fafc; border-top:1px solid var(--border); color:var(--muted); font-size:12px; }}
+  @media print {{ body {{ background:white; }} .page {{ margin:0; width:100%; box-shadow:none; border:none; }} }}
+  @media (max-width:760px) {{ .meta, .kpis {{ grid-template-columns:1fr 1fr; }} .hero, main, footer {{ padding-left:20px; padding-right:20px; }} h1 {{ font-size:26px; }} }}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="hero">
+    <div class="eyebrow">Urban Dynamics Intelligence Platform</div>
+    <h1>Báo cáo phân tích {esc(params.layer)} - {esc(roi)}</h1>
+    <p class="subtitle">Báo cáo tổng hợp chỉ số viễn thám, biến động diện tích phân lớp và khuyến nghị quy hoạch đô thị bền vững.</p>
+    <div class="meta">
+      <div><span class="label">Quốc gia</span><span class="value">{esc(params.country)}</span></div>
+      <div><span class="label">Khu vực</span><span class="value">{esc(roi)}</span></div>
+      <div><span class="label">Giai đoạn</span><span class="value">{esc(first_y)} - {esc(last_y)}</span></div>
+      <div><span class="label">Tháng phân tích</span><span class="value">{esc(params.month)}</span></div>
+    </div>
+  </header>
+  <main>
+    <div class="kpis">
+      <div class="kpi"><span class="label">Khởi điểm</span><b>{fmt_val(params.layer, l_mean_first)}</b></div>
+      <div class="kpi"><span class="label">Hiện tại</span><b style="color:{meta['color']}">{fmt_val(params.layer, l_mean_last)}</b></div>
+      <div class="kpi"><span class="label">Biến động</span><b class="{'pos' if delta_mean >= 0 else 'neg'}">{delta_mean:+.4f}</b></div>
+      <div class="kpi"><span class="label">Đánh giá</span><b style="color:{color_st}">{esc(status)}</b></div>
+    </div>
+    <section>
+      <h2>Tóm tắt thống kê</h2>
+      <table>
+        <tr><th>Chỉ tiêu</th><th>Giá trị</th></tr>
+        <tr><td>Chỉ số phân tích</td><td>{esc(params.layer)} - {esc(meta['env_context'])}</td></tr>
+        <tr><td>Diện tích nguy cơ cao</td><td>{a_high:,.0f} Ha</td></tr>
+        <tr><td>Thời điểm xuất báo cáo</td><td>{generated_at}</td></tr>
+      </table>
+    </section>
+    {ai_section}
+    {analysis_rows}
+    <section>
+      <h2>Xu hướng theo thời gian</h2>
+      <table><tr><th>Năm</th><th>{esc(params.layer)}</th></tr>{trend_rows or '<tr><td colspan="2">Không có dữ liệu</td></tr>'}</table>
+    </section>
+    <section>
+      <h2>Cơ cấu diện tích phân lớp</h2>
+      <table><tr><th>Lớp</th><th>{esc(first_y)} (Ha)</th><th>{esc(last_y)} (Ha)</th><th>Biến động (Ha)</th></tr>{class_rows}</table>
+    </section>
+    <section>
+      <h2>So sánh vùng</h2>
+      <table><tr><th>Khu vực</th><th>Giá trị</th></tr>{region_rows or '<tr><td colspan="2">Không có dữ liệu so sánh vùng</td></tr>'}</table>
+    </section>
+  </main>
+  <footer>Báo cáo được tạo tự động từ dữ liệu Google Earth Engine và mô hình phân tích trong ứng dụng.</footer>
+</div>
+</body>
+</html>"""
+
 # ─── MAP BUILDING ─────────────────────────────────────────────────────────────
 def add_legend(m, layer):
     html = (f"<div style='position:fixed;bottom:36px;left:36px;z-index:9999;"
-            f"background:rgba(7,11,20,0.9);backdrop-filter:blur(12px);"
-            f"padding:14px 18px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);"
-            f"box-shadow:0 8px 25px rgba(0,0,0,0.4);'>"
-            f"<div style='color:#e2e8f0;font-size:12px;font-weight:800;margin-bottom:8px;"
+            f"background:rgba(255,255,255,0.96);backdrop-filter:blur(12px);"
+            f"padding:14px 18px;border-radius:12px;border:1px solid rgba(0,0,0,0.08);"
+            f"box-shadow:0 8px 25px rgba(15,23,42,0.12);'>"
+            f"<div style='color:#0f172a;font-size:12px;font-weight:800;margin-bottom:8px;"
             f"text-transform:uppercase;letter-spacing:0.8px;'>Phân lớp {layer}</div>")
     for label, color in zip(CONFIG["class_labels"][layer], CONFIG["vis"][layer]["palette"]):
         html += (f"<div style='display:flex;align-items:center;margin-bottom:6px;'>"
                  f"<div style='background:{color};width:14px;height:14px;border-radius:3px;"
                  f"margin-right:10px;flex-shrink:0;'></div>"
-                 f"<span style='font-size:12px;font-weight:500;color:#94a3b8;'>{label}</span></div>")
+                 f"<span style='font-size:12px;font-weight:500;color:#334155;'>{label}</span></div>")
     m.get_root().html.add_child(folium.Element(html + "</div>"))
 
-def add_background_mask(m, roi):
-    geemap.ee_tile_layer(
-        ee.Image(1).updateMask(ee.Image.constant(1).clip(roi).mask().Not()),
-        {"palette": ["#0d1526"]}, "Lớp nền tối", True, 0.6
-    ).add_to(m)
+def _resolve_tile_url(image, vis_params):
+    """Server call: trả về URL template tile của 1 EE image+vis."""
+    if vis_params:
+        mid = ee.data.getMapId({"image": image.visualize(**vis_params)})
+    else:
+        mid = ee.data.getMapId({"image": image})
+    return mid["tile_fetcher"].url_format
+
+def parallel_add_ee_layers(m, specs):
+    """
+    OPT1: gọi getMapId() song song cho tất cả layer thay vì tuần tự.
+    specs: list of dict(image, vis, name, visible=True, opacity=1.0).
+    """
+    def _resolve(spec):
+        return _resolve_tile_url(spec["image"], spec.get("vis") or {})
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(specs)))) as pool:
+        urls = list(pool.map(_resolve, specs))
+    out_layers = []
+    for spec, url in zip(specs, urls):
+        tl = folium.raster_layers.TileLayer(
+            tiles=url, attr="Google Earth Engine",
+            name=spec["name"], overlay=True, control=True,
+            show=spec.get("visible", True),
+            opacity=spec.get("opacity", 1.0),
+            max_zoom=24,
+        )
+        if m is not None:
+            tl.add_to(m)
+        out_layers.append(tl)
+    return out_layers
+
+def _mask_spec(roi):
+    return {
+        "image":   ee.Image(1).updateMask(ee.Image.constant(1).clip(roi).mask().Not()),
+        "vis":     {"palette": ["#cbd5e1"]},
+        "name":    "Lớp nền",
+        "visible": True,
+        "opacity": 0.45,
+    }
+
+def _boundary_spec(roi):
+    return {
+        "image":   ee.Image().paint(roi, 0, 2),
+        "vis":     {"palette": ["#4f46e5"]},
+        "name":    "Ranh giới",
+        "visible": True,
+        "opacity": 1.0,
+    }
 
 def base_map():
     m = folium.Map(
@@ -838,19 +1647,44 @@ def base_map():
         zoom_start=st.session_state.get("map_zoom", 6),
         control_scale=True, tiles=None,
     )
-    folium.TileLayer("CartoDB.DarkMatter",    name="Dark Map",       overlay=False, control=True).add_to(m)
     folium.TileLayer("CartoDB.Positron",      name="Light Map",      overlay=False, control=True).add_to(m)
+    folium.TileLayer("CartoDB.DarkMatter",    name="Dark Map",       overlay=False, control=True).add_to(m)
     folium.TileLayer("Esri.WorldImagery",     name="Ảnh vệ tinh",   overlay=False, control=True).add_to(m)
     MousePosition(position="bottomright", separator=" | ", prefix="Tọa độ:").add_to(m)
     return m
 
-def center_map(m, result):
+def _compute_roi_view(geom):
+    """Lấy bounds ROI 1 lần để cache vào session_state, dùng cho mọi map rebuild."""
     try:
-        bounds = result["geom"].bounds().coordinates().getInfo()[0]
-        lats = [pt[1] for pt in bounds]; lons = [pt[0] for pt in bounds]
-        m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]])
-    except:
-        pass
+        coords = geom.bounds().coordinates().getInfo()[0]
+        lats = [pt[1] for pt in coords]
+        lons = [pt[0] for pt in coords]
+        bbox = [[min(lats), min(lons)], [max(lats), max(lons)]]
+        center = [(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2]
+        span = max(max(lats) - min(lats), max(lons) - min(lons))
+        # estimate zoom từ span (°)
+        if   span > 30:  zoom = 3
+        elif span > 15:  zoom = 4
+        elif span > 7:   zoom = 5
+        elif span > 3.5: zoom = 6
+        elif span > 1.8: zoom = 7
+        elif span > 0.9: zoom = 8
+        elif span > 0.45:zoom = 9
+        elif span > 0.2: zoom = 10
+        elif span > 0.1: zoom = 11
+        else:            zoom = 12
+        return center, zoom, bbox
+    except Exception:
+        return [16.0, 106.0], 6, None
+
+def center_map(m, result):
+    """Fit chính xác vào bounds đã cache."""
+    bbox = st.session_state.get("map_bounds")
+    if bbox:
+        try:
+            m.fit_bounds(bbox)
+        except Exception:
+            pass
 
 def add_click_popup(m, click_info, layer):
     """FIX: fmt_val được gọi trong hàm, không nằm trong f-string của outer scope."""
@@ -864,24 +1698,24 @@ def add_click_popup(m, click_info, layer):
     v_lst  = fmt_val("LST",  click_info.get("LST"))
 
     popup_html = f"""
-    <div style="background:rgba(7,11,20,0.92);backdrop-filter:blur(12px);
-         border:1px solid rgba(255,255,255,0.1);border-radius:14px;
-         padding:16px;width:250px;color:white;font-family:'Space Grotesk',sans-serif;
-         box-shadow:0 12px 30px rgba(0,0,0,0.5);">
+    <div style="background:rgba(255,255,255,0.98);backdrop-filter:blur(12px);
+         border:1px solid rgba(0,0,0,0.08);border-radius:14px;
+         padding:16px;width:250px;color:#0f172a;font-family:'Space Grotesk',sans-serif;
+         box-shadow:0 12px 30px rgba(15,23,42,0.15);">
       <div style="font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;">📍 Điểm định vị</div>
-      <div style="font-size:12px;font-weight:600;color:#e2e8f0;line-height:1.4;margin-bottom:3px;">{addr[:50]}...</div>
-      <div style="font-size:10px;color:#475569;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.07);">({lat:.4f}, {lon:.4f})</div>
+      <div style="font-size:12px;font-weight:600;color:#0f172a;line-height:1.4;margin-bottom:3px;">{addr[:50]}...</div>
+      <div style="font-size:10px;color:#64748b;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(0,0,0,0.06);">({lat:.4f}, {lon:.4f})</div>
       <div style="display:flex;justify-content:space-between;margin-bottom:7px;">
-        <span style="font-size:11px;color:#10b981;font-weight:600;">🌿 NDVI</span>
-        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#f8fafc;">{v_ndvi}</span>
+        <span style="font-size:11px;color:#059669;font-weight:600;">🌿 NDVI</span>
+        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#0f172a;">{v_ndvi}</span>
       </div>
       <div style="display:flex;justify-content:space-between;margin-bottom:7px;">
-        <span style="font-size:11px;color:#f97316;font-weight:600;">🏢 NDBI</span>
-        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#f8fafc;">{v_ndbi}</span>
+        <span style="font-size:11px;color:#ea580c;font-weight:600;">🏢 NDBI</span>
+        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#0f172a;">{v_ndbi}</span>
       </div>
       <div style="display:flex;justify-content:space-between;">
-        <span style="font-size:11px;color:#ef4444;font-weight:600;">🌡️ LST</span>
-        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#f8fafc;">{v_lst}</span>
+        <span style="font-size:11px;color:#dc2626;font-weight:600;">🌡️ LST</span>
+        <span style="font-size:13px;font-weight:700;font-family:'JetBrains Mono',monospace;color:#0f172a;">{v_lst}</span>
       </div>
     </div>"""
     folium.Marker(
@@ -892,36 +1726,46 @@ def add_click_popup(m, click_info, layer):
 
 def build_single_map(result, layer, display_year, click_info=None):
     m = base_map()
-    add_background_mask(m, result["roi"])
-    geemap.ee_tile_layer(result["year_data"][display_year]["class"],
-                         CONFIG["vis"][layer], f"Phân loại {layer}", True, 0.9).add_to(m)
-    geemap.ee_tile_layer(ee.Image().paint(result["roi"], 0, 2),
-                         {"palette": ["#6366f1"]}, "Ranh giới", True, 1.0).add_to(m)
+    parallel_add_ee_layers(m, [
+        _mask_spec(result["roi"]),
+        {"image": result["year_data"][display_year]["class"],
+         "vis":   CONFIG["vis"][layer],
+         "name":  f"Phân loại {layer}", "visible": True, "opacity": 0.9},
+        _boundary_spec(result["roi"]),
+    ])
     add_legend(m, layer)
     if click_info:
         add_click_popup(m, click_info, layer)
-    if st.session_state.get("force_zoom"):
-        center_map(m, result)
+    center_map(m, result)
     return m
 
 def build_swipe_map(result, layer, left_year, right_year, click_info=None):
     m = base_map()
-    add_background_mask(m, result["roi"])
-    l = geemap.ee_tile_layer(result["year_data"][left_year]["class"],  CONFIG["vis"][layer], f"{layer} {left_year}",  True, 1.0)
-    r = geemap.ee_tile_layer(result["year_data"][right_year]["class"], CONFIG["vis"][layer], f"{layer} {right_year}", True, 1.0)
-    SideBySideLayers(l, r).add_to(m)
-    geemap.ee_tile_layer(ee.Image().paint(result["roi"], 0, 2),
-                         {"palette": ["#6366f1"]}, "Ranh giới", True, 1.0).add_to(m)
+    # OPT1: resolve 4 tile URL song song
+    mask_tl, left_tl, right_tl, bound_tl = parallel_add_ee_layers(None, [
+        _mask_spec(result["roi"]),
+        {"image": result["year_data"][left_year]["class"],
+         "vis":   CONFIG["vis"][layer],
+         "name":  f"{layer} {left_year}",  "visible": True, "opacity": 1.0},
+        {"image": result["year_data"][right_year]["class"],
+         "vis":   CONFIG["vis"][layer],
+         "name":  f"{layer} {right_year}", "visible": True, "opacity": 1.0},
+        _boundary_spec(result["roi"]),
+    ])
+    # FIX: SideBySideLayers cần 2 layer trái/phải được add_to(m) TRƯỚC để JS có biến tham chiếu
+    mask_tl.add_to(m)
+    left_tl.add_to(m)
+    right_tl.add_to(m)
+    SideBySideLayers(left_tl, right_tl).add_to(m)
+    bound_tl.add_to(m)
     add_legend(m, layer)
     if click_info:
         add_click_popup(m, click_info, layer)
-    if st.session_state.get("force_zoom"):
-        center_map(m, result)
+    center_map(m, result)
     return m
 
 def build_change_map(result, layer, left_year, right_year, click_info=None):
     m = base_map()
-    add_background_mask(m, result["roi"])
     change = (result["year_data"][right_year]["image"].select(layer)
               .subtract(result["year_data"][left_year]["image"].select(layer)))
 
@@ -935,25 +1779,27 @@ def build_change_map(result, layer, left_year, right_year, click_info=None):
         vis = {"min": -4, "max": 4, "palette": ["#2563eb", "#ffffff", "#dc2626"]}
         legend_neg, legend_pos = "🔵 Giảm nhiệt", "🔴 Tăng nhiệt"
 
-    geemap.ee_tile_layer(change.clip(result["geom"]), vis,
-                         f"Biến động {left_year}→{right_year}", True, 0.9).add_to(m)
-    geemap.ee_tile_layer(ee.Image().paint(result["roi"], 0, 2),
-                         {"palette": ["#6366f1"]}, "Ranh giới", True, 1.0).add_to(m)
+    parallel_add_ee_layers(m, [
+        _mask_spec(result["roi"]),
+        {"image": change.clip(result["geom"]), "vis": vis,
+         "name":  f"Biến động {left_year}→{right_year}", "visible": True, "opacity": 0.9},
+        _boundary_spec(result["roi"]),
+    ])
 
     legend_html = f"""
     <div style="position:fixed;bottom:36px;left:36px;z-index:9999;
-         background:rgba(7,11,20,0.92);backdrop-filter:blur(12px);
-         padding:16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);">
-      <div style="color:#e2e8f0;font-size:12px;font-weight:800;margin-bottom:10px;">📍 Dấu vết Biến động</div>
-      <div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">{legend_neg}</div>
-      <div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">⚪ Không đổi</div>
-      <div style="color:#94a3b8;font-size:12px;font-weight:600;">{legend_pos}</div>
+         background:rgba(255,255,255,0.96);backdrop-filter:blur(12px);
+         padding:16px;border-radius:12px;border:1px solid rgba(0,0,0,0.08);
+         box-shadow:0 8px 25px rgba(15,23,42,0.12);">
+      <div style="color:#0f172a;font-size:12px;font-weight:800;margin-bottom:10px;">📍 Dấu vết Biến động</div>
+      <div style="color:#334155;font-size:12px;font-weight:600;margin-bottom:6px;">{legend_neg}</div>
+      <div style="color:#334155;font-size:12px;font-weight:600;margin-bottom:6px;">⚪ Không đổi</div>
+      <div style="color:#334155;font-size:12px;font-weight:600;">{legend_pos}</div>
     </div>"""
     m.get_root().html.add_child(folium.Element(legend_html))
     if click_info:
         add_click_popup(m, click_info, layer)
-    if st.session_state.get("force_zoom"):
-        center_map(m, result)
+    center_map(m, result)
     return m
 
 # ─── CHART RENDERING FUNCTIONS ───────────────────────────────────────────────
@@ -997,6 +1843,51 @@ def render_chart_trend(result, params):
         df_t = pd.DataFrame(result["trend_data"])
         df_p = df_t.rename(columns={"Năm": "ds", "Trị số": "y"})
         df_p["ds"] = pd.to_datetime(df_p["ds"], format="%Y")
+
+        # ── Backtest: nếu ≥ 5 năm, đánh giá MAPE/RMSE bằng train/test split ──
+        eval_m = evaluate_prophet_series(
+            years=df_t["Năm"].tolist(),
+            values=df_t["Trị số"].tolist(),
+            test_size=2,
+        )
+        if eval_m:
+            mape = eval_m.get("MAPE")
+            rmse = eval_m.get("RMSE")
+            if mape is not None:
+                if mape < 5:
+                    tier_label, tier_color = "Rất chính xác", "#059669"
+                elif mape < 15:
+                    tier_label, tier_color = "Chính xác", "#0891b2"
+                elif mape < 30:
+                    tier_label, tier_color = "Chấp nhận được", "#d97706"
+                else:
+                    tier_label, tier_color = "Sai số cao", "#dc2626"
+            else:
+                tier_label, tier_color = "—", "#64748b"
+
+            test_yrs = " · ".join(str(y) for y in eval_m.get("test_years", []))
+            mape_str = f"{mape:.2f}%" if mape is not None else "—"
+            rmse_str = f"{rmse:.4f}" if rmse is not None else "—"
+            st.markdown(
+                f"<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px;'>"
+                f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;'>"
+                f"    <div style='font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>MAPE Backtest</div>"
+                f"    <div style='font-size:17px;font-weight:700;color:{tier_color};font-family:JetBrains Mono;'>{mape_str}</div>"
+                f"    <div style='font-size:9.5px;color:{tier_color};font-weight:600;'>{tier_label}</div>"
+                f"  </div>"
+                f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;'>"
+                f"    <div style='font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>RMSE</div>"
+                f"    <div style='font-size:17px;font-weight:700;color:#334155;font-family:JetBrains Mono;'>{rmse_str}</div>"
+                f"    <div style='font-size:9.5px;color:#64748b;font-weight:600;'>Đơn vị {params.layer}</div>"
+                f"  </div>"
+                f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;'>"
+                f"    <div style='font-size:9px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>Phương pháp</div>"
+                f"    <div style='font-size:11.5px;font-weight:700;color:#334155;line-height:1.3;'>Train {eval_m.get('n_train')} năm</div>"
+                f"    <div style='font-size:9.5px;color:#64748b;font-weight:600;'>Test {eval_m.get('n_test')}: {test_yrs}</div>"
+                f"  </div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         m = Prophet(yearly_seasonality=False, weekly_seasonality=False,
                     daily_seasonality=False, interval_width=0.95)
@@ -1151,7 +2042,7 @@ def render_chart_pie(result, params):
         values=[d["Ha"]  for d in pie_data],
         hole=0.62,
         marker=dict(colors=[d["Màu"] for d in pie_data],
-                    line=dict(color="rgba(7,11,20,1)", width=2)),
+                    line=dict(color="#ffffff", width=2)),
         textposition="outside",
         textinfo="label+percent",
         textfont=dict(size=11),
@@ -1161,7 +2052,7 @@ def render_chart_pie(result, params):
         height=290, margin=dict(l=30, r=30, t=20, b=10), showlegend=False,
         annotations=[dict(
             text=f"Tổng<br><b>{int(total):,} Ha</b>",
-            x=0.5, y=0.5, font_size=13, font_color="#e2e8f0", showarrow=False,
+            x=0.5, y=0.5, font_size=13, font_color="#0f172a", showarrow=False,
         )],
         **PD,
     )
@@ -1177,8 +2068,8 @@ def render_chart_pie(result, params):
             color = "#10b981" if d["Delta"] > 0 else "#ef4444" if d["Delta"] < 0 else "#64748b"
         st.markdown(
             f"<div style='display:flex;justify-content:space-between;font-size:12px;"
-            f"padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);'>"
-            f"<span style='color:#94a3b8;'>{d['Lớp']}</span>"
+            f"padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.06);'>"
+            f"<span style='color:#334155;'>{d['Lớp']}</span>"
             f"<span style='color:{color};font-weight:700;font-family:monospace;'>"
             f"{arrow} {abs(d['Delta']):,.0f} Ha</span></div>",
             unsafe_allow_html=True,
@@ -1200,14 +2091,24 @@ def render_chart_uhi(result, params):
     """
     df_u = st.session_state.get("current_df_hist")
 
-    if df_u is None or df_u.empty:
+    if df_u is None:
         st.info("📍 Click vào một điểm trên bản đồ để tải dữ liệu tương quan UHI.")
         return
-
-    df_clean = df_u.dropna(subset=["NDVI", "LST", "NDBI"]).copy()
-    if len(df_clean) < 3:
-        st.warning("Cần ít nhất 3 điểm dữ liệu để phân tích UHI.")
+    if df_u.empty:
+        st.warning("⚠️ Không lấy được dữ liệu lịch sử tại điểm này. Hãy click lại điểm khác hoặc bấm 🚀 KHỞI CHẠY để fetch lại.")
         return
+
+    # FIX: chỉ cần NDVI + LST cho hồi quy UHI. NDBI dùng làm marker size là tùy chọn.
+    df_clean = df_u.dropna(subset=["NDVI", "LST"]).copy()
+    if len(df_clean) < 3:
+        st.warning(
+            f"Cần ≥ 3 năm có đủ NDVI+LST để phân tích UHI tại điểm này. "
+            f"Hiện chỉ có {len(df_clean)} năm (mây che / Landsat thiếu band ST_B10). "
+            f"Hãy thử click một điểm khác hoặc đổi tháng đồng bộ."
+        )
+        return
+    # NDBI có thể NaN — dùng 0 làm marker size fallback
+    df_clean["NDBI"] = df_clean["NDBI"].fillna(0)
 
     # ── Sklearn regression ────────────────────────────────
     X_arr    = df_clean["NDVI"].values.reshape(-1, 1)
@@ -1267,8 +2168,9 @@ def render_chart_uhi(result, params):
     eq_label = (f"LST = {coef:.2f}·NDVI + {intercept:.2f}   |   R² = {r2:.3f}")
     fig.add_annotation(x=0.02, y=0.96, xref="paper", yref="paper",
                        text=eq_label, showarrow=False,
-                       font=dict(size=11, color="#818cf8", family="JetBrains Mono"),
-                       bgcolor="rgba(7,11,20,0.7)", borderpad=5)
+                       font=dict(size=11, color="#4f46e5", family="JetBrains Mono"),
+                       bgcolor="rgba(248,250,252,0.92)", borderpad=5,
+                       bordercolor="#e2e8f0", borderwidth=1)
 
     fig.update_layout(
         height=290, margin=dict(l=10,r=10,t=10,b=10),
@@ -1295,6 +2197,478 @@ def render_chart_uhi(result, params):
     )
 
 
+@st.fragment
+def render_chart_chat(result, params):
+    """
+    Tab Hỏi AI: chat native Streamlit, isolated fragment.
+    Context: vị trí điểm click + thời tiết + phân tích hiện tại.
+    """
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # Xác định vị trí context
+    click = st.session_state.get("map_click_value")
+    if click:
+        lat, lon = click["lat"], click["lon"]
+        address  = click.get("address", "")
+        loc_label = f"📍 {address[:80] if address else 'Điểm đã click'}"
+        loc_color = "#059669"
+    elif result:
+        bbox = st.session_state.get("map_bounds")
+        if bbox:
+            lat = (bbox[0][0] + bbox[1][0]) / 2
+            lon = (bbox[0][1] + bbox[1][1]) / 2
+        else:
+            lat, lon = 16.0, 106.0
+        address = result.get("roi_names", "")
+        loc_label = f"🎯 Trung tâm {address} ({lat:.3f}, {lon:.3f})"
+        loc_color = "#6366f1"
+    else:
+        lat, lon = 16.0, 106.0
+        address = ""
+        loc_label = "🌏 Mặc định: trung tâm Việt Nam"
+        loc_color = "#94a3b8"
+
+    # Header: vị trí + nút clear
+    hcol1, hcol2 = st.columns([4, 1])
+    with hcol1:
+        st.markdown(
+            f"<div style='font-size:11.5px;color:{loc_color};font-weight:600;"
+            f"padding:6px 10px;background:#f8fafc;border-radius:8px;"
+            f"border-left:3px solid {loc_color};margin-bottom:8px;'>"
+            f"{loc_label}</div>",
+            unsafe_allow_html=True,
+        )
+    with hcol2:
+        if st.button("🗑️ Xoá", key="chat_clear", use_container_width=True,
+                     help="Xoá lịch sử chat"):
+            st.session_state["chat_history"] = []
+            st.rerun(scope="fragment")
+
+    # Hint nếu chưa có history
+    if not st.session_state["chat_history"]:
+        st.info("👋 Hỏi tôi gì cũng được về **thời tiết**, **môi trường**, **đô thị** "
+                "ở vị trí này. Tôi sẽ trả lời bằng dữ liệu thật từ Earth Engine + "
+                "Open-Meteo.\n\n**Ví dụ:**\n"
+                "- *Thời tiết tuần tới có mưa không?*\n"
+                "- *Vùng này đô thị hoá nhanh hay chậm?*\n"
+                "- *Nên trồng cây ở đây không?*\n"
+                "- *So sánh với 5 năm trước thì sao?*")
+
+    # Render lịch sử
+    for msg in st.session_state["chat_history"]:
+        avatar = "🧑" if msg["role"] == "user" else "🤖"
+        with st.chat_message(msg["role"], avatar=avatar):
+            st.markdown(msg["content"])
+
+    # Input
+    user_input = st.chat_input(
+        "Hỏi về thời tiết, môi trường, đô thị... ",
+        key="chat_input_main",
+    )
+    if user_input:
+        st.session_state["chat_history"].append(
+            {"role": "user", "content": user_input}
+        )
+        with st.chat_message("user", avatar="🧑"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("🤖 Đang phân tích dữ liệu thật..."):
+                # Lấy weather (cache 30min đã có sẵn)
+                try:
+                    weather = get_forecast_weather(lat, lon)
+                except Exception:
+                    weather = None
+                reply = ai_chat_reply(
+                    user_input, lat, lon, address, params, result, weather
+                )
+            st.markdown(reply)
+
+        st.session_state["chat_history"].append(
+            {"role": "assistant", "content": reply}
+        )
+
+
+def render_chart_risk(result, params):
+    """
+    Urban Risk Score 0–100: gauge + components breakdown + per-region ranking.
+    """
+    risk = compute_risk_score(result, params)
+
+    # ── 1. Gauge chart ────────────────────────────────────────────────
+    gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=risk["score"],
+        number={"font": {"size": 36, "color": risk["color"]},
+                "suffix": "/100"},
+        gauge={
+            "axis": {"range": [0, 100], "tickwidth": 1, "tickcolor": "#94a3b8",
+                     "tickfont": {"size": 10, "color": "#64748b"}},
+            "bar": {"color": risk["color"], "thickness": 0.25},
+            "bgcolor": "rgba(0,0,0,0)",
+            "steps": [
+                {"range": [0, 25],   "color": "rgba(5,150,105,0.18)"},
+                {"range": [25, 50],  "color": "rgba(217,119,6,0.18)"},
+                {"range": [50, 75],  "color": "rgba(220,38,38,0.18)"},
+                {"range": [75, 100], "color": "rgba(124,45,18,0.22)"},
+            ],
+            "threshold": {
+                "line": {"color": risk["color"], "width": 4},
+                "thickness": 0.85, "value": risk["score"],
+            },
+        },
+        title={"text": f"<b style='color:{risk['color']}'>{risk['label']}</b>",
+               "font": {"size": 14}},
+    ))
+    gauge.update_layout(height=240, margin=dict(l=20, r=20, t=40, b=10), **PD)
+    st.plotly_chart(gauge, use_container_width=True, config={"displayModeBar": False})
+
+    # ── 2. Components breakdown ────────────────────────────────────────
+    st.markdown("<div style='font-size:11px;font-weight:700;color:#64748b;"
+                "margin:6px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>"
+                "Phân tách 3 thành phần</div>", unsafe_allow_html=True)
+
+    comps = list(risk["components"].items())
+    weights = risk["weights"]
+    comp_labels = [c[0] for c in comps]
+    comp_values = [c[1] for c in comps]
+    comp_weighted = [comp_values[i] * weights[comp_labels[i]] / 100 for i in range(3)]
+
+    comp_fig = go.Figure()
+    comp_fig.add_trace(go.Bar(
+        x=comp_values, y=comp_labels, orientation="h",
+        marker_color=["#6366f1", "#0891b2", "#d97706"],
+        marker_opacity=0.85,
+        text=[f"{v:.0f}/100 (w={weights[comp_labels[i]]}%)" for i, v in enumerate(comp_values)],
+        textposition="outside", textfont=dict(size=10, color="#334155"),
+        hovertemplate="<b>%{y}</b><br>Điểm: %{x:.1f}<br>"
+                      f"Đóng góp: %{{customdata:.1f}} điểm<extra></extra>",
+        customdata=comp_weighted,
+    ))
+    comp_fig.update_layout(height=160, margin=dict(l=10, r=80, t=10, b=10),
+                           xaxis=dict(range=[0, 110], showgrid=False),
+                           **PD)
+    st.plotly_chart(comp_fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── 3. Detailed reasoning ─────────────────────────────────────────
+    layer = params.layer
+    meta = CONFIG["layer_meta"][layer]
+    raw = risk["raw"]
+    direction = ("giảm" if raw["delta"] < 0 else "tăng")
+    bad_dir = ("giảm" if meta["good_high"] else "tăng")
+    is_worsening = direction == bad_dir
+    trend_emoji = "📉" if (meta["good_high"] and raw["delta"] < 0) or (not meta["good_high"] and raw["delta"] > 0) else "📈"
+
+    st.markdown(f"""
+    <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px;
+                padding:10px 12px; font-size:12px; line-height:1.6; color:#334155;
+                margin-top:6px;">
+      <b>{trend_emoji} Diễn giải:</b><br>
+      • Giá trị {layer} hiện tại: <b>{fmt_val(layer, raw["current_value"])}</b><br>
+      • Biến động: <b>{raw["delta"]:+.4f}</b> ({raw["pct_change"]:+.1f}%) — xu hướng
+        <b style="color:{'#dc2626' if is_worsening else '#059669'}">{direction}</b>
+        ({'xấu đi' if is_worsening else 'tích cực'})<br>
+      • % diện tích nằm trong vùng nguy cơ (class 3-4):
+        <b>{raw["high_pct"]:.1f}%</b> ({raw["high_area_ha"]:,.0f} Ha)
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 4. Per-region ranking nếu user chọn ≥ 2 vùng ────────────────────
+    if params.sub_regions and len(params.sub_regions) >= 2:
+        st.markdown("<div style='font-size:11px;font-weight:700;color:#64748b;"
+                    "margin:14px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>"
+                    "Xếp hạng rủi ro theo vùng</div>", unsafe_allow_html=True)
+        with st.spinner("⏳ Đang tính điểm rủi ro cho từng vùng..."):
+            try:
+                regions = compute_per_region_risk(
+                    params.country,
+                    tuple(sorted(params.sub_regions)),
+                    params.layer,
+                    params.month,
+                    tuple(sorted(params.years_multi)),
+                )
+            except Exception as e:
+                st.warning(f"Không tính được dữ liệu từng vùng: {e}")
+                regions = []
+
+        if not regions:
+            st.info("Không có dữ liệu cho từng vùng.")
+            return
+
+        # Sort by score desc
+        regions.sort(key=lambda r: r["score"], reverse=True)
+
+        # Bar chart
+        df_r = pd.DataFrame(regions)
+        bar_colors = []
+        for s in df_r["score"]:
+            if s < 25:   bar_colors.append("#059669")
+            elif s < 50: bar_colors.append("#d97706")
+            elif s < 75: bar_colors.append("#dc2626")
+            else:        bar_colors.append("#7c2d12")
+        rank_fig = go.Figure(go.Bar(
+            x=df_r["score"], y=df_r["region"], orientation="h",
+            marker_color=bar_colors, marker_opacity=0.9,
+            text=df_r["score"].apply(lambda v: f"{v:.1f}"),
+            textposition="outside", textfont=dict(size=11, color="#334155"),
+            hovertemplate="<b>%{y}</b><br>Điểm Rủi Ro: %{x:.1f}<br>"
+                          "%{customdata}<extra></extra>",
+            customdata=[f"Δ {r['pct_change']:+.1f}% — Hiện trạng {r['current_component']:.0f} | "
+                        f"Xu hướng {r['delta_component']:.0f}"
+                        for r in regions],
+        ))
+        rank_fig.update_layout(
+            height=max(150, len(regions) * 32),
+            margin=dict(l=10, r=80, t=10, b=10),
+            xaxis=dict(range=[0, 110], title="Điểm Rủi Ro (0-100)",
+                       title_font_size=10, showgrid=False),
+            **PD,
+        )
+        st.plotly_chart(rank_fig, use_container_width=True, config={"displayModeBar": False})
+
+        # Top + bottom
+        top = regions[0]
+        bot = regions[-1]
+        st.info(f"🚨 **Rủi ro cao nhất:** {top['region']} (điểm **{top['score']}/100**, "
+                f"Δ {top['pct_change']:+.1f}%). "
+                f"✅ **An toàn nhất:** {bot['region']} (điểm **{bot['score']}/100**, "
+                f"Δ {bot['pct_change']:+.1f}%).")
+
+
+def render_chart_forecast(result, params):
+    """
+    Tab Dự báo: Prophet AI dự đoán diện tích từng class đến 2030 & 2035.
+    Hiển thị line chart history+forecast với CI band + 3 pie chart so sánh
+    + bảng delta + cảnh báo môi trường tự động.
+    """
+    if params.country != result.get("_forecast_country", params.country) or \
+       not params.sub_regions:
+        pass  # dùng country alone vẫn OK
+
+    with st.spinner("⏳ Đang tải lịch sử 9 năm + huấn luyện mô hình Prophet cho 4 lớp..."):
+        try:
+            df_hist = fetch_area_history(
+                params.country,
+                tuple(sorted(params.sub_regions)),
+                params.layer,
+                params.month,
+            )
+        except Exception as e:
+            st.error(f"Lỗi tải lịch sử: {e}")
+            return
+        if df_hist.empty or df_hist[["class_1","class_2","class_3","class_4"]].dropna(how="all").empty:
+            st.warning("Không lấy được lịch sử để dự báo.")
+            return
+        try:
+            fc = forecast_land_use(df_hist, target_years=(2030, 2035))
+        except Exception as e:
+            st.error(f"Lỗi Prophet: {e}")
+            return
+
+    labels = CONFIG["class_labels"][params.layer]
+    colors = CONFIG["vis"][params.layer]["palette"]
+    classes = ["class_1", "class_2", "class_3", "class_4"]
+    last_y = fc["last_hist_year"]
+
+    # ── 0. Đánh giá độ chính xác mô hình Prophet (backtest) ────────────────
+    eval_m = fc.get("eval_metrics", {})
+    valid_evals = {c: m for c, m in eval_m.items() if m}
+    if valid_evals:
+        # Trung bình MAPE qua các lớp có metric hợp lệ
+        mape_vals = [m["MAPE"] for m in valid_evals.values() if m.get("MAPE") is not None]
+        rmse_vals = [m["RMSE"] for m in valid_evals.values() if m.get("RMSE") is not None]
+        avg_mape  = float(np.mean(mape_vals)) if mape_vals else None
+        avg_rmse  = float(np.mean(rmse_vals)) if rmse_vals else None
+        sample    = next(iter(valid_evals.values()))
+        n_train, n_test = sample.get("n_train"), sample.get("n_test")
+        test_yrs_str = " · ".join(str(y) for y in sample.get("test_years", []))
+
+        # Đánh giá chất lượng theo ngưỡng MAPE
+        if avg_mape is None:
+            tier_label, tier_color = "N/A", "#64748b"
+        elif avg_mape < 10:
+            tier_label, tier_color = "Rất tốt", "#059669"
+        elif avg_mape < 20:
+            tier_label, tier_color = "Tốt", "#0891b2"
+        elif avg_mape < 35:
+            tier_label, tier_color = "Chấp nhận được", "#d97706"
+        else:
+            tier_label, tier_color = "Cần cải thiện", "#dc2626"
+
+        st.markdown(
+            f"<div style='font-size:11px;font-weight:700;color:#64748b;"
+            f"margin:2px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>"
+            f"📐 Độ chính xác mô hình Prophet (Backtest)</div>",
+            unsafe_allow_html=True,
+        )
+        mape_str = f"{avg_mape:.1f}%" if avg_mape is not None else "—"
+        rmse_str = f"{avg_rmse:,.0f} Ha" if avg_rmse is not None else "—"
+        st.markdown(
+            f"<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;'>"
+            f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+            f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>MAPE trung bình</div>"
+            f"    <div style='font-size:20px;font-weight:700;color:{tier_color};font-family:JetBrains Mono;'>{mape_str}</div>"
+            f"    <div style='font-size:10px;color:{tier_color};font-weight:600;'>{tier_label}</div>"
+            f"  </div>"
+            f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+            f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>RMSE trung bình</div>"
+            f"    <div style='font-size:20px;font-weight:700;color:#334155;font-family:JetBrains Mono;'>{rmse_str}</div>"
+            f"    <div style='font-size:10px;color:#64748b;font-weight:600;'>Sai số tuyệt đối</div>"
+            f"  </div>"
+            f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+            f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;'>Phương pháp</div>"
+            f"    <div style='font-size:13px;font-weight:700;color:#334155;'>Train {n_train} năm</div>"
+            f"    <div style='font-size:10px;color:#64748b;font-weight:600;'>Test {n_test} năm: {test_yrs_str}</div>"
+            f"  </div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Bảng chi tiết MAPE/RMSE từng lớp
+        with st.expander("📋 Chi tiết sai số từng lớp đất", expanded=False):
+            rows = []
+            for cls, lbl in zip(classes, labels):
+                m = eval_m.get(cls) or {}
+                rows.append({
+                    "Lớp đất":  lbl,
+                    "MAPE (%)": f"{m['MAPE']:.2f}" if m.get("MAPE") is not None else "—",
+                    "RMSE (Ha)": f"{m['RMSE']:,.0f}" if m.get("RMSE") is not None else "—",
+                    "MAE (Ha)":  f"{m['MAE']:,.0f}"  if m.get("MAE")  is not None else "—",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption(
+                "💡 **MAPE** (Mean Absolute Percentage Error) — sai số trung bình theo %. "
+                "Càng thấp càng tốt: <10% rất tốt, 10-20% tốt, 20-35% chấp nhận, >35% kém.  \n"
+                "💡 **RMSE** (Root Mean Squared Error) — sai số tuyệt đối theo Ha, phạt mạnh các điểm lệch lớn."
+            )
+    else:
+        st.caption("ℹ️ Chưa đủ dữ liệu để backtest mô hình (cần ≥ 5 năm có data hợp lệ).")
+
+    # ── 1. Line chart history + forecast với CI band ────────────────────────
+    fig = go.Figure()
+    for cls, lbl, color in zip(classes, labels, colors):
+        s = fc["series"].get(cls)
+        if s is None:
+            continue
+        s_hist = s[s["year"] <= last_y]
+        s_fut  = s[s["year"] >= last_y]
+        # CI band cho phần forecast
+        fig.add_trace(go.Scatter(
+            x=list(s_fut["year"]) + list(s_fut["year"])[::-1],
+            y=list(s_fut["yhat_upper"]) + list(s_fut["yhat_lower"])[::-1],
+            fill="toself", fillcolor=f"rgba({int(color[1:3],16)},{int(color[3:5],16)},{int(color[5:7],16)},0.10)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name=f"{lbl} CI", showlegend=False, hoverinfo="skip",
+        ))
+        # Lịch sử (đường liền)
+        fig.add_trace(go.Scatter(
+            x=s_hist["year"], y=s_hist["yhat"],
+            mode="lines+markers", name=f"{lbl}",
+            line=dict(color=color, width=2.5),
+            marker=dict(size=6, color=color),
+            hovertemplate=f"<b>{lbl}</b><br>%{{x}}: %{{y:,.0f}} Ha<extra></extra>",
+        ))
+        # Forecast (đường đứt)
+        fig.add_trace(go.Scatter(
+            x=s_fut["year"], y=s_fut["yhat"],
+            mode="lines+markers", name=f"{lbl} dự báo",
+            line=dict(color=color, width=2, dash="dash"),
+            marker=dict(size=6, color=color, symbol="diamond"),
+            showlegend=False,
+            hovertemplate=f"<b>{lbl}</b><br>%{{x}} (dự báo): %{{y:,.0f}} Ha<extra></extra>",
+        ))
+
+    fig.add_vline(x=last_y, line_dash="dot", line_color="#94a3b8",
+                  annotation_text=f"→ Dự báo từ {last_y+1}",
+                  annotation_position="top right",
+                  annotation_font_size=10, annotation_font_color="#64748b")
+
+    fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10),
+                      xaxis_title="Năm", yaxis_title="Diện tích (Ha)",
+                      legend=dict(orientation="h", y=1.12, font_size=10),
+                      hovermode="x unified", **PD)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── 2. Pie chart 3 năm so sánh (hiện tại / 2030 / 2035) ─────────────────
+    st.markdown("<div style='font-size:11px;font-weight:700;color:#64748b;margin:14px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>Cơ cấu đất đai theo thời gian</div>", unsafe_allow_html=True)
+
+    cur_row = df_hist[df_hist["year"] == last_y].iloc[0]
+    snapshots = [
+        (f"Năm {last_y}", {c: cur_row[c] for c in classes}),
+        ("Dự báo 2030", {c: fc.get(2030, {}).get(c) for c in classes}),
+        ("Dự báo 2035", {c: fc.get(2035, {}).get(c) for c in classes}),
+    ]
+    cols = st.columns(3)
+    for col, (title, data) in zip(cols, snapshots):
+        with col:
+            values = [data.get(c) or 0 for c in classes]
+            if sum(values) == 0:
+                col.info(f"_{title}_\n\nThiếu dữ liệu")
+                continue
+            pie = go.Figure(go.Pie(
+                labels=labels, values=values, hole=0.55,
+                marker=dict(colors=colors, line=dict(color="#ffffff", width=1.5)),
+                textinfo="percent", textfont=dict(size=9),
+                hovertemplate="<b>%{label}</b><br>%{value:,.0f} Ha<br>%{percent}<extra></extra>",
+            ))
+            pie.update_layout(
+                height=180, margin=dict(l=5, r=5, t=25, b=5), showlegend=False,
+                title=dict(text=title, font_size=11, x=0.5,
+                           font_color="#475569"),
+                annotations=[dict(text=f"{int(sum(values)):,}<br>Ha",
+                                  x=0.5, y=0.5, font_size=10,
+                                  font_color="#0f172a", showarrow=False)],
+                **PD,
+            )
+            col.plotly_chart(pie, use_container_width=True,
+                             config={"displayModeBar": False})
+
+    # ── 3. Bảng delta + cảnh báo ──────────────────────────────────────────
+    st.markdown("<div style='font-size:11px;font-weight:700;color:#64748b;margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>Biến động dự báo 2035 vs " + str(last_y) + "</div>", unsafe_allow_html=True)
+
+    insights = []
+    for cls, lbl in zip(classes, labels):
+        cur = cur_row[cls] or 0
+        fut = fc.get(2035, {}).get(cls)
+        if fut is None:
+            continue
+        delta = fut - cur
+        pct = (delta / cur * 100) if cur > 0 else 0
+        arrow = "▲" if delta > 0 else "▼"
+        # màu phụ thuộc class+layer: với NDVI rừng tăng = tốt, với NDBI đô thị tăng = xấu
+        good_for_delta_positive = {
+            "NDVI": [False, False, True, True],   # nước/trống tăng=xấu; rừng tăng=tốt
+            "NDBI": [True, True, False, False],   # rừng/trống tăng=tốt; đô thị tăng=xấu
+            "LST":  [True, True, False, False],   # mát tăng=tốt; nóng tăng=xấu
+        }
+        idx = classes.index(cls)
+        is_good = good_for_delta_positive[params.layer][idx] == (delta > 0)
+        color = "#059669" if is_good else "#dc2626"
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;"
+            f"font-size:12px;padding:4px 0;border-bottom:1px solid rgba(0,0,0,0.06);'>"
+            f"<span style='color:#334155;'>{lbl}</span>"
+            f"<span style='color:{color};font-weight:700;font-family:monospace;'>"
+            f"{arrow} {abs(int(delta)):,} Ha ({pct:+.1f}%)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if abs(pct) > 10:
+            insights.append((lbl, delta, pct, is_good))
+
+    # ── 4. Auto insight ──────────────────────────────────────────
+    if insights:
+        worst = max(insights, key=lambda x: 0 if x[3] else abs(x[2]))
+        if not worst[3]:  # is bad
+            st.error(f"🚨 **Cảnh báo:** {worst[0]} dự kiến biến động "
+                     f"{worst[2]:+.1f}% ({worst[1]:+,.0f} Ha) vào 2035. "
+                     f"Cần chính sách quy hoạch ngay từ {last_y+1}.")
+        else:
+            st.success(f"✅ Xu hướng tích cực: {worst[0]} dự kiến {worst[2]:+.1f}% vào 2035.")
+    else:
+        st.info("ℹ️ Dự báo Prophet cho thấy cơ cấu đất đai khá ổn định đến 2035 (biến động < 10%).")
+
+
 def render_chart_bar_region(result, params):
     """Hiển thị bar chart so sánh giữa các vùng — FIX: tính năng gốc bị bỏ sót hoàn toàn."""
     bar_data = result.get("bar_data", [])
@@ -1315,7 +2689,7 @@ def render_chart_bar_region(result, params):
         marker_color=[meta["color"]] * len(df_b),
         marker_opacity=0.85,
         text=df_b["Trị số"].apply(lambda v: fmt_val(params.layer, v)),
-        textposition="outside", textfont=dict(size=10, color="#94a3b8"),
+        textposition="outside", textfont=dict(size=10, color="#334155"),
         hovertemplate="<b>%{y}</b><br>%{x:.3f}<extra></extra>",
     ))
     fig.update_layout(height=max(200, len(df_b) * 38),
@@ -1328,6 +2702,239 @@ def render_chart_bar_region(result, params):
             f"**{best['Khu vực']}** có {params.layer} cao nhất ({fmt_val(params.layer, best['Trị số'])}); "
             f"**{worst['Khu vực']}** thấp nhất ({fmt_val(params.layer, worst['Trị số'])}).")
 
+
+# ─── AI FEATURE: KMEANS CLUSTERING THEO VÙNG ─────────────────────────────────
+def compute_region_multilayer_means(country: str, sub_regions: list, month: str, year: str) -> pd.DataFrame:
+    """
+    Fetch song song NDVI / NDBI / LST (mean) cho từng sub_region trong năm chỉ định.
+    Trả về DataFrame: [Khu vực, NDVI, NDBI, LST].
+    """
+    if not sub_regions or len(sub_regions) < 2:
+        return pd.DataFrame()
+
+    roi = get_dynamic_roi(country, sub_regions)
+    geom = roi.geometry()
+    images = {L: get_image(geom, year, month, L) for L in ("NDVI", "NDBI", "LST")}
+    SCALE = CONFIG["scale"]
+
+    def _fetch(region: str, layer_name: str):
+        try:
+            sub_geom = roi.filter(ee.Filter.eq("ADM1_NAME", region)).geometry()
+            v = (images[layer_name].select(layer_name)
+                 .reduceRegion(reducer=ee.Reducer.mean(), geometry=sub_geom,
+                               scale=SCALE * 4, maxPixels=1e13,
+                               tileScale=4, bestEffort=True)
+                 .get(layer_name).getInfo())
+            return v
+        except Exception:
+            return None
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futs = {(r, L): pool.submit(_fetch, r, L)
+                for r in sub_regions for L in ("NDVI", "NDBI", "LST")}
+        for r in sub_regions:
+            rows.append({
+                "Khu vực": r,
+                "NDVI": futs[(r, "NDVI")].result(),
+                "NDBI": futs[(r, "NDBI")].result(),
+                "LST":  futs[(r, "LST")].result(),
+            })
+    return pd.DataFrame(rows).dropna().reset_index(drop=True)
+
+
+def render_chart_clustering(result, params):
+    """KMeans clustering: phân nhóm các vùng theo (NDVI, NDBI, LST)."""
+    st.markdown("**🧭 Phân cụm AI — KMeans (NDVI · NDBI · LST)**")
+    st.caption("Mô hình ML không giám sát tự động phân loại các vùng đang chọn "
+               "thành các nhóm đô thị tương đồng dựa trên 3 chỉ số viễn thám.")
+
+    if not params.sub_regions or len(params.sub_regions) < 2:
+        st.info("ℹ️ Chọn **≥ 2 vùng quan trắc** ở cột bên trái để bật phân cụm AI.")
+        return
+
+    last_y = result.get("last_y") or sorted(params.years_multi)[-1]
+    cache_key = ("cluster_data_"
+                 f"{params.country}_{'_'.join(sorted(params.sub_regions))}_{params.month}_{last_y}")
+
+    if st.button("🔍 Chạy phân cụm AI", use_container_width=True, key="cluster_run_btn"):
+        with st.spinner("Đang tải NDVI/NDBI/LST cho từng vùng từ Earth Engine..."):
+            try:
+                df = compute_region_multilayer_means(
+                    params.country, params.sub_regions, params.month, last_y
+                )
+                st.session_state[cache_key] = df
+            except Exception as e:
+                st.error(f"❌ Lỗi khi tải dữ liệu: {e}")
+                return
+
+    df = st.session_state.get(cache_key)
+    if df is None:
+        st.caption("⬆️ Bấm nút trên để tính phân cụm.")
+        return
+    if df.empty or len(df) < 3:
+        st.warning("⚠️ Cần ≥ 3 vùng có dữ liệu hợp lệ để KMeans (k=3). Chọn thêm vùng và thử lại.")
+        return
+
+    # ── Train KMeans ────────────────────────────────────────────
+    X = df[["NDVI", "NDBI", "LST"]].values
+    X_scaled = StandardScaler().fit_transform(X)
+    k = min(3, len(df))
+    km = KMeans(n_clusters=k, random_state=42, n_init=10).fit(X_scaled)
+    df = df.copy()
+    df["Cụm"] = km.labels_
+
+    # ── Auto-label clusters theo đặc trưng centroid ─────────────
+    centroids_z = pd.DataFrame(km.cluster_centers_, columns=["NDVI_z", "NDBI_z", "LST_z"])
+
+    def _name_cluster(row):
+        if row["NDVI_z"] > 0 and row["LST_z"] < 0:
+            return "🌳 Đô thị xanh & mát"
+        if row["NDBI_z"] > 0 and row["LST_z"] > 0:
+            return "🏙️ Đô thị nóng & bê tông"
+        if row["NDVI_z"] < 0 and row["LST_z"] > 0:
+            return "🔥 Đất trống khô & nóng"
+        if row["NDVI_z"] > 0 and row["NDBI_z"] < 0:
+            return "🌾 Nông nghiệp / nông thôn"
+        return "⚖️ Trung tính"
+
+    cluster_names = {i: _name_cluster(centroids_z.iloc[i]) for i in range(k)}
+    df["Nhãn cụm"] = df["Cụm"].map(cluster_names)
+
+    # ── 3D scatter Plotly ───────────────────────────────────────
+    fig = px.scatter_3d(
+        df, x="NDVI", y="NDBI", z="LST",
+        color="Nhãn cụm", text="Khu vực", height=440,
+        color_discrete_sequence=px.colors.qualitative.Set2,
+    )
+    fig.update_traces(marker=dict(size=9, line=dict(width=1, color="white")))
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0),
+                      scene=dict(xaxis_title="NDVI (thực vật)",
+                                 yaxis_title="NDBI (đô thị hóa)",
+                                 zaxis_title="LST (nhiệt °C)"),
+                      legend=dict(orientation="h", y=-0.05))
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # ── Bảng kết quả ────────────────────────────────────────────
+    df_display = df[["Khu vực", "NDVI", "NDBI", "LST", "Nhãn cụm"]].copy()
+    df_display["NDVI"] = df_display["NDVI"].round(3)
+    df_display["NDBI"] = df_display["NDBI"].round(3)
+    df_display["LST"]  = df_display["LST"].round(2)
+    st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+    # ── Tổng kết theo cụm ───────────────────────────────────────
+    summary = df.groupby("Nhãn cụm").agg(
+        SoVung=("Khu vực", "count"),
+        NDVI_TB=("NDVI", "mean"),
+        NDBI_TB=("NDBI", "mean"),
+        LST_TB=("LST", "mean"),
+    ).round(3).reset_index()
+    st.markdown("**📋 Đặc trưng từng cụm:**")
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    # ── Nhận xét tự động ────────────────────────────────────────
+    hottest = df.loc[df["LST"].idxmax()]
+    coolest = df.loc[df["LST"].idxmin()]
+    st.info(f"🎯 **Tóm tắt:** Vùng **{hottest['Khu vực']}** nóng nhất ({hottest['LST']:.1f}°C, "
+            f"nhóm *{hottest['Nhãn cụm']}*); vùng **{coolest['Khu vực']}** mát nhất "
+            f"({coolest['LST']:.1f}°C, nhóm *{coolest['Nhãn cụm']}*).")
+
+
+# ─── AI FEATURE: GEMINI VISION PHÂN TÍCH ẢNH VỆ TINH ─────────────────────────
+def call_gemini_vision_on_roi(params, result) -> str:
+    """
+    Render ảnh GEE phân loại của ROI hiện tại → gửi Gemini 2.5 Flash Vision phân tích.
+    """
+    try:
+        last_y = result.get("last_y") or sorted(params.years_multi)[-1]
+        roi = get_dynamic_roi(params.country, params.sub_regions)
+        geom = roi.geometry()
+        img = get_image(geom, last_y, params.month, params.layer)
+        classified = classify_global(img, params.layer, geom, last_y, params.month).clip(geom)
+        vis = classified.visualize(**CONFIG["vis"][params.layer])
+
+        url = vis.getThumbURL({
+            "region": geom.bounds(),
+            "dimensions": 768,
+            "format": "png",
+        })
+        r = requests.get(url, timeout=45)
+        r.raise_for_status()
+        img_bytes = r.content
+    except Exception as e:
+        return f"⚠️ Không lấy được ảnh từ Earth Engine: {e}"
+
+    meta = CONFIG["layer_meta"][params.layer]
+    class_labels = " / ".join(CONFIG["class_labels"][params.layer])
+    roi_name = result.get("roi_names") or params.country
+    prompt = (
+        f"Đây là bản đồ phân loại chỉ số viễn thám {params.layer} của khu vực {roi_name}, "
+        f"tháng {params.month}/{last_y}. Bảng màu phân thành 4 lớp: {class_labels}. "
+        f"Bối cảnh: {meta['env_context']}. "
+        f"Hãy phân tích bằng tiếng Việt trong 4-6 câu: "
+        f"(1) phân bố không gian các lớp trên ảnh, "
+        f"(2) chỉ ra các điểm nóng / vùng đáng chú ý, "
+        f"(3) nhận định xu hướng đô thị hóa hoặc rủi ro môi trường, "
+        f"(4) khuyến nghị quy hoạch ngắn gọn. "
+        f"Không dùng markdown, không gạch đầu dòng."
+    )
+
+    total_keys = len(GEMINI_KEYS_POOL)
+    last_err = None
+    for _ in range(total_keys):
+        idx = st.session_state.current_key_idx
+        key = GEMINI_KEYS_POOL[idx]
+        try:
+            client = genai.Client(api_key=key)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    genai.types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                    prompt,
+                ],
+            )
+            if resp and resp.text:
+                return resp.text.strip()
+        except Exception as e:
+            last_err = e
+            err_msg = str(e).lower()
+            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+                st.session_state.current_key_idx = (idx + 1) % total_keys
+                print(f"[Vision Key Rotation] Key {idx} hết quota → chuyển sang {st.session_state.current_key_idx}")
+                time.sleep(0.5)
+                continue
+            return f"⚠️ Lỗi Gemini Vision: {e}"
+
+    return f"⚠️ Tất cả 4 API keys đều đã hết quota. (Lỗi cuối: {last_err})"
+
+
+def render_chart_vision(result, params):
+    """Tab Gemini Vision — phân tích ảnh GEE đã visualize."""
+    st.markdown("**🛰️ AI nhìn ảnh vệ tinh (Gemini 2.5 Vision)**")
+    st.caption("Gemini multimodal phân tích trực tiếp ảnh phân loại GEE của vùng đang chọn — "
+               "không chỉ đọc số liệu mà còn 'nhìn' phân bố không gian.")
+
+    last_y = result.get("last_y") or sorted(params.years_multi)[-1]
+    cache_key = ("vision_analysis_"
+                 f"{params.country}_{'_'.join(sorted(params.sub_regions or []))}_"
+                 f"{params.layer}_{params.month}_{last_y}")
+
+    if st.button("🛰️ Gửi ảnh cho Gemini Vision phân tích", use_container_width=True, key="vision_run_btn"):
+        with st.spinner("Đang render ảnh GEE & gửi lên Gemini Vision (~10-20s)..."):
+            analysis = call_gemini_vision_on_roi(params, result)
+            st.session_state[cache_key] = analysis
+
+    analysis = st.session_state.get(cache_key)
+    if analysis:
+        st.markdown(
+            f"<div style='padding:14px 16px;background:#f8fafc;border-left:3px solid #6366f1;"
+            f"border-radius:6px;line-height:1.75;font-size:14px;color:#1e293b;'>{analysis}</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("⬆️ Bấm nút trên — Gemini sẽ 'nhìn' bản đồ và mô tả bằng lời.")
+
+
 # ─── MAIN UI LAYOUT ───────────────────────────────────────────────────────────
 st.markdown(
     "<div class='main-title'>"
@@ -1337,7 +2944,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-col_ctrl, col_map, col_report = st.columns([1.2, 2.8, 1.5], gap="large")
+col_ctrl, col_map, col_report = st.columns([1.0, 2.4, 1.8], gap="medium")
 
 # ════════ CỘT 1: ĐIỀU KHIỂN ════════════════════════════════════════════════════
 with col_ctrl:
@@ -1370,6 +2977,11 @@ with col_ctrl:
             years_s = sorted(years_multi)
 
             base_obj    = build_base_objects(params)
+            # OPT: compute ROI bounds 1 lần → cache vào session để mọi map rebuild fit_bounds
+            _center, _zoom, _bbox = _compute_roi_view(base_obj["geom"])
+            st.session_state["map_center"] = _center
+            st.session_state["map_zoom"]   = _zoom
+            st.session_state["map_bounds"] = _bbox
             cached_data = check_cache_in_db(q_hash)
 
             if cached_data:
@@ -1378,6 +2990,7 @@ with col_ctrl:
                 st.session_state.update({
                     "params": params, "result": final_result,
                     "cached_report": cached_data["gemini_report"],
+                    "ai_trigger": bool(cached_data["gemini_report"]),
                     "analyzed": True,
                     "display_year":    years_s[-1],
                     "compare_left":    years_s[0],
@@ -1387,13 +3000,21 @@ with col_ctrl:
                     "current_df_hist": None,
                 })
             else:
-                with st.spinner("⏳ Đang thu thập dữ liệu GEE & phân tích AI..."):
+                with st.spinner("⏳ Đang thu thập dữ liệu GEE..."):
                     try:
-                        stats        = compute_stats(params, base_obj)
+                        # OPT3: cache RAM theo params — chạy lại cùng params không gọi GEE nữa
+                        stats        = compute_stats_cached(
+                            params.country,
+                            tuple(sorted(params.sub_regions)),
+                            params.layer,
+                            params.month,
+                            tuple(sorted(params.years_multi)),
+                        )
                         final_result = {**base_obj, **stats}
                         st.session_state.update({
                             "params": params, "result": final_result,
                             "cached_report": None,
+                            "ai_trigger": False,
                             "analyzed": True,
                             "display_year":    years_s[-1],
                             "compare_left":    years_s[0],
@@ -1407,17 +3028,16 @@ with col_ctrl:
                     except Exception as e:
                         st.error(f"Lỗi truy xuất GEE: {e}")
 
-    st.markdown("""
-    <a href="http://127.0.0.1:5500/weather_chat_demo.html" target="_blank" style="text-decoration:none;">
-      <button style="width:100%;height:3rem;border-radius:12px;
-        background:linear-gradient(135deg,#0891b2,#3b82f6);
-        color:white;border:none;font-weight:700;font-size:14px;
-        cursor:pointer;margin-top:8px;
-        box-shadow:0 4px 15px rgba(8,145,178,0.35);">
-        💬 HỎI ĐÁP AI THỜI TIẾT
-      </button>
-    </a>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        "<div style='margin-top:8px;padding:10px 12px;"
+        "background:linear-gradient(135deg,rgba(8,145,178,0.08),rgba(59,130,246,0.08));"
+        "border-left:3px solid #0891b2;border-radius:10px;"
+        "font-size:12px;color:#475569;line-height:1.5;'>"
+        "💬 <b>Hỏi AI</b> đã tích hợp vào tab <b>\"💬 Hỏi AI\"</b> ở cột phải. "
+        "Click một điểm trên bản đồ → mở tab để chat về thời tiết & môi trường."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 # ════════ CỘT 2: BẢN ĐỒ ════════════════════════════════════════════════════════
 with col_map:
@@ -1439,19 +3059,17 @@ with col_map:
         )
         st.session_state["map_mode"] = map_mode
 
-        # ── Xử lý click trả về từ st_folium (lần rerun trước) ─────────────
-        # FIX: chỉ đọc khi map_mode có st_folium, tránh đọc stale state từ timelapse
-        if (map_mode != "🎞️ Chuyển động thời gian"
-                and "main_map" in st.session_state
-                and st.session_state["main_map"]):
-            map_data = st.session_state["main_map"]
-            if map_data.get("center"):
-                st.session_state["map_center"] = [
-                    map_data["center"]["lat"], map_data["center"]["lng"]
-                ]
-            if map_data.get("zoom"):
-                st.session_state["map_zoom"] = map_data["zoom"]
-
+        # ── Xử lý click trả về từ st_folium (chỉ last_clicked, không track center/zoom) ─
+        _map_key_by_mode = {
+            "🗺️ Bản đồ đơn":         "map_single",
+            "🪞 Trượt so sánh":      "map_swipe",
+            "📍 Dấu vết biến động":  "map_change",
+        }
+        _active_map_key = _map_key_by_mode.get(map_mode)
+        if (_active_map_key
+                and _active_map_key in st.session_state
+                and st.session_state[_active_map_key]):
+            map_data = st.session_state[_active_map_key]
             last_clicked = map_data.get("last_clicked")
             if last_clicked:
                 lat_c, lon_c = last_clicked["lat"], last_clicked["lng"]
@@ -1462,9 +3080,12 @@ with col_map:
                                   if map_mode == "🗺️ Bản đồ đơn"
                                   else st.session_state["compare_right"])
                     with st.spinner("⏳ Đang thu thập dữ liệu điểm..."):
-                        address  = get_address_from_coords(lat_c, lon_c)
-                        vals     = get_three_indices(lat_c, lon_c, query_year, params.month)
-                        weather  = get_forecast_weather(lat_c, lon_c)
+                        # OPT: gọi 3 API song song (Nominatim, GEE, Open-Meteo) thay vì nối tiếp
+                        with ThreadPoolExecutor(max_workers=3) as _pool:
+                            _fa = _pool.submit(get_address_from_coords, lat_c, lon_c)
+                            _fv = _pool.submit(get_three_indices, lat_c, lon_c, query_year, params.month)
+                            _fw = _pool.submit(get_forecast_weather, lat_c, lon_c)
+                            address, vals, weather = _fa.result(), _fv.result(), _fw.result()
                         st.session_state["map_click_value"] = {
                             "lat": lat_c, "lon": lon_c,
                             "address": address,
@@ -1488,7 +3109,7 @@ with col_map:
             )
             m = build_single_map(result, params.layer, st.session_state["display_year"], click_info)
             st.markdown(f"<div class='map-toolbar'>🗺️ Lớp phủ {params.layer} — Năm {st.session_state['display_year']}</div>", unsafe_allow_html=True)
-            st_folium(m, width=None, height=520, returned_objects=["last_clicked", "center", "zoom"], key="main_map")
+            st_folium(m, width=None, height=520, returned_objects=["last_clicked"], key="map_single")
 
         elif map_mode in ("🪞 Trượt so sánh", "📍 Dấu vết biến động"):
             if len(result["years"]) < 2:
@@ -1510,12 +3131,13 @@ with col_map:
                                         st.session_state["compare_left"],
                                         st.session_state["compare_right"], click_info)
                     st.markdown(f"<div class='map-toolbar'>🪞 So sánh: {st.session_state['compare_left']} ←|→ {st.session_state['compare_right']}</div>", unsafe_allow_html=True)
+                    st_folium(m, width=None, height=520, returned_objects=["last_clicked"], key="map_swipe")
                 else:
                     m = build_change_map(result, params.layer,
                                          st.session_state["compare_left"],
                                          st.session_state["compare_right"], click_info)
                     st.markdown(f"<div class='map-toolbar'>📍 Biến động: {st.session_state['compare_left']} → {st.session_state['compare_right']}</div>", unsafe_allow_html=True)
-                st_folium(m, width=None, height=520, returned_objects=["last_clicked", "center", "zoom"], key="main_map")
+                    st_folium(m, width=None, height=520, returned_objects=["last_clicked"], key="map_change")
 
         elif map_mode == "🎞️ Chuyển động thời gian":
             st.markdown("<div class='map-toolbar'>🎞️ Đang thiết lập Timelapse...</div>", unsafe_allow_html=True)
@@ -1566,11 +3188,20 @@ with col_map:
 
         # ── Time series điểm click ────────────────────────────────────────
         if click_info and map_mode != "🎞️ Chuyển động thời gian":
-            with st.spinner("⏳ Đang tải chuỗi thời gian lịch sử..."):
-                df_hist = get_full_history_at_point(
-                    click_info["lat"], click_info["lon"], params.month
-                ).dropna()
-                st.session_state["current_df_hist"] = df_hist
+            hist_key = (round(click_info["lat"], 4), round(click_info["lon"], 4), params.month)
+            df_hist = st.session_state.get("current_df_hist")
+            _need_fetch = (
+                st.session_state.get("current_df_hist_key") != hist_key
+                or df_hist is None
+                or (hasattr(df_hist, "empty") and df_hist.empty)
+            )
+            if _need_fetch:
+                with st.spinner("⏳ Đang tải chuỗi thời gian lịch sử..."):
+                    df_hist = get_full_history_at_point(
+                        click_info["lat"], click_info["lon"], params.month
+                    )
+                    st.session_state["current_df_hist"] = df_hist
+                    st.session_state["current_df_hist_key"] = hist_key
 
                 if not df_hist.empty:
                     fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
@@ -1596,8 +3227,8 @@ with col_map:
 
     else:
         # Default map khi chưa phân tích
-        empty_m = folium.Map(location=[16.0, 106.0], zoom_start=5, tiles="CartoDB.DarkMatter")
-        st_folium(empty_m, width=None, height=750)
+        empty_m = folium.Map(location=[16.0, 106.0], zoom_start=5, tiles="CartoDB.Positron")
+        st_folium(empty_m, width=None, height=750, key="empty_map", returned_objects=[])
 
 # ════════ CỘT 3: BÁO CÁO + BIỂU ĐỒ ════════════════════════════════════════════
 with col_report:
@@ -1607,7 +3238,7 @@ with col_report:
         params      = st.session_state["params"]
         result      = st.session_state["result"]
         PD = dict(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                  font_color="#94a3b8", font_family="'Space Grotesk',sans-serif")
+                  font_color="#334155", font_family="'Space Grotesk',sans-serif")
 
         first_y, last_y = result["first_y"], result["last_y"]
         stats_first = result.get("stats_first", {})
@@ -1655,27 +3286,43 @@ with col_report:
         if status == "Cảnh báo":
             st.error(f"🚨 Chỉ số {params.layer} đang ở mức nguy hiểm tại {result['roi_names']}!")
 
-        # ── Gemini AI report ─────────────────────────────────────────────
-        if st.session_state.get("pending_db_save"):
+        # ── Gemini AI report (fragment, không block UI chính) ────────────
+        @st.fragment
+        def _ai_report_fragment():
+            cached = st.session_state.get("cached_report")
+            pending = st.session_state.get("pending_db_save")
+            ai_trigger = st.session_state.get("ai_trigger", False)
+
+            if cached:
+                st.markdown(f"""
+                <div class='ai-report'>
+                    <div class='ai-report-label'>🤖 Báo Cáo Chuyên Sâu — Gemini 2.5</div>
+                    <div class='ai-report-text'>{cached}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                return
+
+            if not ai_trigger:
+                if st.button("🤖 Sinh báo cáo AI Gemini", use_container_width=True, key="btn_gen_ai"):
+                    st.session_state["ai_trigger"] = True
+                    st.rerun(scope="fragment")
+                return
+
             with st.spinner("🤖 Gemini AI đang phân tích..."):
                 report = generate_gemini_report(
                     params.layer, first_y, last_y,
                     l_mean_first, l_mean_last, a_high, result["roi_names"]
                 )
                 st.session_state["cached_report"] = report
-                stats_to_save = {k: result[k] for k in
-                                 ["area_first", "area_last", "stats_first", "stats_last",
-                                  "hist_last", "trend_data", "bar_data"]}
-                save_cache_to_db(st.session_state["current_hash"], params, stats_to_save, report)
-                st.session_state["pending_db_save"] = False
+                if pending:
+                    stats_to_save = {k: result[k] for k in
+                                     ["area_first", "area_last", "stats_first", "stats_last",
+                                      "hist_last", "trend_data", "bar_data"]}
+                    save_cache_to_db(st.session_state["current_hash"], params, stats_to_save, report)
+                    st.session_state["pending_db_save"] = False
+            st.rerun(scope="fragment")
 
-        if st.session_state.get("cached_report"):
-            st.markdown(f"""
-            <div class='ai-report'>
-                <div class='ai-report-label'>🤖 Báo Cáo Chuyên Sâu — Gemini 2.5</div>
-                <div class='ai-report-text'>{st.session_state['cached_report']}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        _ai_report_fragment()
 
         # ── Academic analysis box (auto-generated) ───────────────────────
         with st.expander("🔬 Phân tích Học thuật Tự động", expanded=False):
@@ -1686,7 +3333,10 @@ with col_report:
 
         # ── Chart tabs ───────────────────────────────────────────────────
         tab_labels = ["⛅ Thời tiết", "📈 Xu hướng", "📊 Mật độ",
-                      "🥧 Cơ cấu", "🌡️ Đảo nhiệt", "🌐 So vùng", "📥 Tải Về"]
+                      "🥧 Cơ cấu", "🌡️ Đảo nhiệt", "🌐 So vùng",
+                      "🔮 Dự báo 2035", "🎯 Điểm Rủi Ro",
+                      "🧭 Phân cụm AI", "🛰️ AI nhìn ảnh",
+                      "💬 Hỏi AI", "📥 Tải Về"]
         tabs = st.tabs(tab_labels)
 
         with tabs[0]:
@@ -1709,6 +3359,21 @@ with col_report:
             render_chart_bar_region(result, params)
 
         with tabs[6]:
+            render_chart_forecast(result, params)
+
+        with tabs[7]:
+            render_chart_risk(result, params)
+
+        with tabs[8]:
+            render_chart_clustering(result, params)
+
+        with tabs[9]:
+            render_chart_vision(result, params)
+
+        with tabs[10]:
+            render_chart_chat(result, params)
+
+        with tabs[11]:
             st.markdown("<div style='font-size:12px;color:#64748b;margin-bottom:10px;'>Xuất dữ liệu phân tích</div>", unsafe_allow_html=True)
 
             if result["trend_data"]:
@@ -1760,9 +3425,9 @@ with col_report:
 
     else:
         st.markdown(
-            "<div style='text-align:center;padding:60px 20px;color:#475569;"
-            "background:rgba(255,255,255,0.03);border-radius:16px;"
-            "border:1px dashed rgba(255,255,255,0.08);'>"
+            "<div style='text-align:center;padding:60px 20px;color:#64748b;"
+            "background:#f8fafc;border-radius:16px;"
+            "border:1px dashed #cbd5e1;'>"
             "Hệ thống chưa có dữ liệu.<br>"
             "<span style='font-size:12px;'>Cấu hình thông số và nhấn 🚀 Khởi chạy.</span>"
             "</div>",
