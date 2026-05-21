@@ -32,7 +32,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
-from google import genai
+import google.generativeai as genai
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
