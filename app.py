@@ -1193,8 +1193,10 @@ def call_gemini_with_rotation(model_name: str, contents: str, system_instruction
     if total_keys == 0:
         raise RuntimeError("Chưa cấu hình Gemini API key trong Streamlit Secrets hoặc biến môi trường.")
 
+    last_err = None
     for _ in range(total_keys):
-        idx = st.session_state.current_key_idx
+        idx = st.session_state.current_key_idx % total_keys
+        st.session_state.current_key_idx = idx
         current_key = GEMINI_KEYS_POOL[idx]
 
         try:
@@ -1214,17 +1216,27 @@ def call_gemini_with_rotation(model_name: str, contents: str, system_instruction
                 return response.text
 
         except Exception as e:
+            last_err = e
             err_msg = str(e).lower()
-            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+            key_can_rotate = (
+                "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+                or "api_key_invalid" in err_msg
+                or "api key expired" in err_msg
+                or "api key not valid" in err_msg
+                or "permission_denied" in err_msg
+            )
+            if key_can_rotate:
                 next_idx = (idx + 1) % total_keys
                 st.session_state.current_key_idx = next_idx
-                print(f"[Key Rotation] Key index {idx} bị cạn quota. Chuyển sang Key index {next_idx}...")
+                print(f"[Key Rotation] Key index {idx} không dùng được. Chuyển sang Key index {next_idx}...")
                 time.sleep(0.5)
                 continue
             else:
                 raise e
 
-    raise RuntimeError("Tất cả 4 API Keys của bạn đều đã hết hạn mức Quota trong phút/ngày này!")
+    raise RuntimeError(f"Tất cả Gemini API keys đều không dùng được. Lỗi cuối: {last_err}")
 
 
 def generate_gemini_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name):
@@ -1383,9 +1395,9 @@ Câu hỏi từ người dùng:
     if "503" in err_str or "UNAVAILABLE" in err_str:
         return ("⚠️ **Gemini AI đang quá tải.** "
                 "Hệ thống đã thử cả 2 model × 4 key. Bạn thử lại sau 1–2 phút nhé.")
-    if "401" in err_str or "API_KEY_INVALID" in err_str or "API KEY NOT VALID" in err_str.upper():
+    if "401" in err_str or "API_KEY_INVALID" in err_str or "API KEY NOT VALID" in err_str.upper() or "API KEY EXPIRED" in err_str.upper():
         return ("⚠️ **API key Gemini không hợp lệ.** "
-                "Vui lòng kiểm tra `GEMINI_KEY_1..4` trong file `.env`.")
+                "Vui lòng kiểm tra `GEMINI_KEY_1..4` trong Streamlit Secrets hoặc file `.env`.")
     if "404" in err_str or "NOT_FOUND" in err_str:
         return ("⚠️ **Model Gemini không khả dụng.** "
                 "Có thể Google đã đổi tên model. Liên hệ admin cập nhật `GEMINI_MODELS`.")
@@ -2973,9 +2985,17 @@ def call_gemini_vision_on_roi(params, result) -> str:
         except Exception as e:
             last_err = e
             err_msg = str(e).lower()
-            if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
+            if (
+                "429" in err_msg
+                or "quota" in err_msg
+                or "resource_exhausted" in err_msg
+                or "api_key_invalid" in err_msg
+                or "api key expired" in err_msg
+                or "api key not valid" in err_msg
+                or "permission_denied" in err_msg
+            ):
                 st.session_state.current_key_idx = (idx + 1) % total_keys
-                print(f"[Vision Key Rotation] Key {idx} hết quota → chuyển sang {st.session_state.current_key_idx}")
+                print(f"[Vision Key Rotation] Key {idx} không dùng được -> chuyển sang {st.session_state.current_key_idx}")
                 time.sleep(0.5)
                 continue
             return f"⚠️ Lỗi Gemini Vision: {e}"
