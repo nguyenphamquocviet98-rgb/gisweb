@@ -1063,24 +1063,34 @@ def get_forecast_weather(lat, lon):
                f"&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max"
                f"&hourly=relative_humidity_2m&timezone=auto")
         res = requests.get(url, timeout=5).json()
-        cw  = res.get("current_weather", {})
-        current_hum = res.get("hourly", {}).get("relative_humidity_2m", [0])[0]
-        current = {"temp": cw.get("temperature"), "wind": cw.get("windspeed"),
-                   "code": cw.get("weathercode"), "humidity": current_hum}
+        cw = res.get("current_weather", {})
+        humidity_values = res.get("hourly", {}).get("relative_humidity_2m", [])
+        current_hum = humidity_values[0] if humidity_values else None
+        current = {
+            "temp": cw.get("temperature"),
+            "wind": cw.get("windspeed"),
+            "code": cw.get("weathercode"),
+            "humidity": current_hum,
+        }
         daily = res.get("daily", {})
         forecast = []
         if daily and "time" in daily:
-            for i in range(len(daily["time"])):
+            n = len(daily["time"])
+            max_t = daily.get("temperature_2m_max", [])
+            min_t = daily.get("temperature_2m_min", [])
+            weathercode = daily.get("weathercode", [])
+            rain_prob = daily.get("precipitation_probability_max", [])
+            for i in range(n):
                 dt = datetime.strptime(daily["time"][i], "%Y-%m-%d")
                 forecast.append({
-                    "date":      dt.strftime("%d/%m"),
-                    "max_t":     daily["temperature_2m_max"][i],
-                    "min_t":     daily["temperature_2m_min"][i],
-                    "code":      daily["weathercode"][i],
-                    "rain_prob": daily.get("precipitation_probability_max", [0] * 7)[i],
+                    "date": dt.strftime("%d/%m"),
+                    "max_t": max_t[i] if i < len(max_t) else None,
+                    "min_t": min_t[i] if i < len(min_t) else None,
+                    "code": weathercode[i] if i < len(weathercode) else None,
+                    "rain_prob": rain_prob[i] if i < len(rain_prob) else None,
                 })
         return {"current": current, "forecast": forecast}
-    except:
+    except Exception:
         return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2098,33 +2108,53 @@ def build_change_map(result, layer, left_year, right_year, click_info=None):
 
 # ─── CHART RENDERING FUNCTIONS ───────────────────────────────────────────────
 def render_chart_weather(click_val):
-    if not click_val or not click_val.get("weather"):
+    if not click_val or not isinstance(click_val.get("weather"), dict):
         st.info("📍 Click vào một điểm trên bản đồ để xem thông tin thời tiết thực tế.")
         return
     weather = click_val["weather"]
-    w_curr  = weather["current"]
-    w_fore  = weather["forecast"]
+    w_curr = weather.get("current", {})
+    w_fore = weather.get("forecast") or []
+
     st.markdown(f"**📍 Vị trí:** `{click_val.get('address','')}`")
     c1, c2, c3 = st.columns(3)
-    c1.metric("🌡️ Nhiệt độ", f"{w_curr['temp']} °C")
-    c2.metric("💨 Gió", f"{w_curr['wind']} km/h")
-    c3.metric("💧 Độ ẩm", f"{w_curr.get('humidity','—')} %")
-    if w_fore:
-        st.markdown("<div style='font-size:12px;font-weight:700;color:#f59e0b;margin:12px 0 8px;'>Dự báo 7 ngày tới</div>", unsafe_allow_html=True)
-        df_f = pd.DataFrame(w_fore)
-        fig  = go.Figure()
-        fig.add_trace(go.Scatter(x=df_f["date"], y=df_f["max_t"], mode="lines+markers+text",
-                                  name="Cao nhất", line=dict(color="#ef4444", width=2),
-                                  text=df_f["max_t"].apply(lambda x: f"{x:.0f}°"),
-                                  textposition="top center", textfont=dict(size=10)))
-        fig.add_trace(go.Scatter(x=df_f["date"], y=df_f["min_t"], mode="lines+markers+text",
-                                  name="Thấp nhất", line=dict(color="#3b82f6", width=2),
-                                  text=df_f["min_t"].apply(lambda x: f"{x:.0f}°"),
-                                  textposition="bottom center", textfont=dict(size=10)))
-        fig.update_layout(height=240, margin=dict(l=10,r=10,t=10,b=10),
-                          xaxis_type="category", legend=dict(orientation="h", y=1.12), **PD)
-        fig.update_yaxes(showticklabels=False, showgrid=False)
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    temp = w_curr.get("temp")
+    wind = w_curr.get("wind")
+    hum = w_curr.get("humidity")
+    c1.metric("🌡️ Nhiệt độ", f"{temp if temp is not None else '—'} °C")
+    c2.metric("💨 Gió", f"{wind if wind is not None else '—'} km/h")
+    c3.metric("💧 Độ ẩm", f"{hum if hum is not None else '—'} %")
+
+    if not w_fore:
+        st.info("Không có dữ liệu dự báo 7 ngày từ Open-Meteo.")
+        return
+
+    st.markdown("<div style='font-size:12px;font-weight:700;color:#f59e0b;margin:12px 0 8px;'>Dự báo 7 ngày tới</div>", unsafe_allow_html=True)
+    df_f = pd.DataFrame(w_fore)
+    if df_f.empty:
+        st.info("Không có dữ liệu dự báo 7 ngày.")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_f["date"], y=df_f["max_t"],
+        mode="lines+markers+text",
+        name="Cao nhất",
+        line=dict(color="#ef4444", width=2),
+        text=df_f["max_t"].apply(lambda x: f"{x:.0f}°" if x is not None else "—"),
+        textposition="top center", textfont=dict(size=10),
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_f["date"], y=df_f["min_t"],
+        mode="lines+markers+text",
+        name="Thấp nhất",
+        line=dict(color="#3b82f6", width=2),
+        text=df_f["min_t"].apply(lambda x: f"{x:.0f}°" if x is not None else "—"),
+        textposition="bottom center", textfont=dict(size=10),
+    ))
+    fig.update_layout(height=240, margin=dict(l=10, r=10, t=10, b=10),
+                      xaxis_type="category", legend=dict(orientation="h", y=1.12), **PD)
+    fig.update_yaxes(showticklabels=False, showgrid=False)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 def render_chart_trend(result, params):
