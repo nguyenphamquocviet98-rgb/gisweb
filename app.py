@@ -51,6 +51,10 @@ def initialize_earth_engine():
         if "gcp_service_account" in st.secrets:
             service_account_info = st.secrets["gcp_service_account"]
             
+            # FIX: Ép kiểu và sửa lỗi ký tự xuống dòng văn bản '\\n' thành '\n' thực tế
+            raw_private_key = service_account_info.get("private_key", "")
+            formatted_private_key = raw_private_key.replace("\\n", "\n")
+            
             # Extract credentials from service account
             credentials = ee.ServiceAccountCredentials(
                 email=service_account_info.get("client_email"),
