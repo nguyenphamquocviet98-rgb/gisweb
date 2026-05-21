@@ -42,6 +42,42 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+# ─── EARTH ENGINE INITIALIZATION ───────────────────────────────────────────────
+@st.cache_resource
+def initialize_earth_engine():
+    """Initialize Google Earth Engine using Streamlit Secrets."""
+    try:
+        # Try to get GCP service account from Streamlit secrets
+        if "gcp_service_account" in st.secrets:
+            service_account_info = st.secrets["gcp_service_account"]
+            
+            # Extract credentials from service account
+            credentials = ee.ServiceAccountCredentials(
+                email=service_account_info.get("client_email"),
+                key_data=service_account_info.get("private_key")
+            )
+            
+            # Initialize Earth Engine with service account credentials
+            ee.Initialize(credentials=credentials, project=service_account_info.get("project_id"))
+            st.sidebar.success("✅ Earth Engine initialized (Service Account)")
+            return True
+        else:
+            # Fallback: Try to initialize with cached credentials
+            try:
+                ee.Initialize(project=os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5"))
+                st.sidebar.info("ℹ️ Earth Engine initialized (Cached credentials)")
+                return True
+            except Exception as fallback_error:
+                st.sidebar.error(f"❌ Earth Engine initialization failed: {str(fallback_error)}")
+                return False
+                
+    except Exception as e:
+        st.sidebar.error(f"❌ Error initializing Earth Engine: {str(e)}")
+        return False
+
+# Initialize Earth Engine on app startup
+ee_initialized = initialize_earth_engine()
+
 # ─── GLOBAL CONFIG ───────────────────────────────────────────────────────────
 CONFIG = {
     "project_id": os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5"),
