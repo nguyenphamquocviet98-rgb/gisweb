@@ -43,40 +43,50 @@ st.set_page_config(
 )
 
 # ─── EARTH ENGINE INITIALIZATION ───────────────────────────────────────────────
-@st.cache_resource
 def initialize_earth_engine():
     """Initialize Google Earth Engine using Streamlit Secrets."""
+    project_id = os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5")
+
     try:
-        # Try to get GCP service account from Streamlit secrets
-        if "gcp_service_account" in st.secrets:
+        has_service_account = "gcp_service_account" in st.secrets
+    except Exception:
+        has_service_account = False
+
+    if has_service_account:
+        try:
             service_account_info = st.secrets["gcp_service_account"]
-            
-            # FIX: Ép kiểu và sửa lỗi ký tự xuống dòng văn bản '\\n' thành '\n' thực tế
-            raw_private_key = service_account_info.get("private_key", "")
+            client_email = service_account_info.get("client_email")
+            project_id = service_account_info.get("project_id", project_id)
+            raw_private_key = str(service_account_info.get("private_key", ""))
             formatted_private_key = raw_private_key.replace("\\n", "\n").strip()
-            
-            # Extract credentials from service account
-            credentials = ee.ServiceAccountCredentials(
-                email=service_account_info.get("client_email"),
-                key_data=formatted_private_key
-            )
-            
-            # Initialize Earth Engine with service account credentials
-            ee.Initialize(credentials=credentials, project=service_account_info.get("project_id"))
-            st.sidebar.success("✅ Earth Engine initialized (Service Account)")
-            return True
-        else:
-            # Fallback: Try to initialize with cached credentials
-            try:
-                ee.Initialize(project=os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5"))
-                st.sidebar.info("ℹ️ Earth Engine initialized (Cached credentials)")
-                return True
-            except Exception as fallback_error:
-                st.sidebar.error(f"❌ Earth Engine initialization failed: {str(fallback_error)}")
+
+            if not project_id or not client_email or not formatted_private_key:
+                st.error("❌ Streamlit Secrets thiếu `project_id`, `client_email` hoặc `private_key` trong `[gcp_service_account]`.")
                 return False
-                
+            if "-----BEGIN PRIVATE KEY-----" not in formatted_private_key or "-----END PRIVATE KEY-----" not in formatted_private_key:
+                st.error("❌ `private_key` trong Streamlit Secrets không đúng định dạng PEM.")
+                st.info("Hãy dùng dạng nhiều dòng: `private_key = \"\"\"-----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----\"\"\"`.")
+                return False
+
+            credentials = ee.ServiceAccountCredentials(
+                client_email,
+                key_data=formatted_private_key,
+            )
+            ee.Initialize(credentials=credentials, project=project_id)
+            st.success("✅ Earth Engine initialized (Service Account)")
+            return True
+        except Exception as e:
+            st.error(f"❌ Earth Engine Service Account lỗi: {e}")
+            st.info("Kiểm tra lại Streamlit Secrets: `project_id`, `client_email`, `private_key` và quyền Earth Engine của service account.")
+            return False
+
+    try:
+        ee.Initialize(project=project_id)
+        st.info("ℹ️ Earth Engine initialized (Local credentials)")
+        return True
     except Exception as e:
-        st.sidebar.error(f"❌ Error initializing Earth Engine: {str(e)}")
+        st.error(f"❌ Không khởi tạo được Google Earth Engine: {e}")
+        st.info("Nếu chạy trên Streamlit Cloud, hãy cấu hình `[gcp_service_account]` trong Secrets. Nếu chạy local, chạy `earthengine authenticate`.")
         return False
 
 # Initialize Earth Engine on app startup
@@ -198,12 +208,7 @@ def save_cache_to_db(query_hash, params, stats_dict, gemini_report):
 def init_gee():
     if ee_initialized:
         return
-    try:
-        ee.Initialize(project=CONFIG["project_id"])
-    except Exception as e:
-        st.error(f"❌ Lỗi kết nối Google Earth Engine — project: {CONFIG['project_id']}")
-        st.info("Mở Terminal và chạy: **earthengine authenticate**")
-        st.stop()
+    st.stop()
 
 init_gee()
 
