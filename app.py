@@ -8,6 +8,7 @@
 
 # ─── IMPORTS ─────────────────────────────────────────────────────────────────
 import time, json, os, hashlib, requests, html, re
+from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("USE_FOLIUM", "1")  # geemap: chọn folium backend trước khi import
 from dataclasses import dataclass
@@ -1188,20 +1189,27 @@ GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None):
     meta = CONFIG["layer_meta"][layer]
     delta = (last_val or 0) - (first_val or 0)
-    direction = "tang" if delta > 0 else "giam" if delta < 0 else "gan nhu khong doi"
+    direction = "tăng" if delta > 0 else "giảm" if delta < 0 else "gần như không đổi"
     status, _ = layer_status(layer, last_val)
-    good_context = "tich cuc" if (delta >= 0) == meta["good_high"] else "can theo doi"
-    reason_text = f" Bao cao nay duoc tao bang bo mau noi bo vi Gemini dang loi: {reason}." if reason else ""
+    good_context = "tích cực" if (delta >= 0) == meta["good_high"] else "cần theo dõi chặt chẽ"
+    reason_text = f" Báo cáo này được tạo bằng bộ phân tích nội bộ vì Gemini đang lỗi: {reason}." if reason else ""
+    risk_level = "cao" if status == "Cảnh báo" else "trung bình" if status == "Trung bình" else "thấp"
 
     return (
-        f"Bao cao tu dong offline:{reason_text} Tai {roi_name}, chi so {layer} "
-        f"({meta['env_context']}) trong giai doan {first_year}-{last_year} "
-        f"{direction} tu {fmt_val(layer, first_val)} len {fmt_val(layer, last_val)}, "
-        f"chenh lech {delta:+.3f}. Trang thai hien tai duoc danh gia la {status}; "
-        f"xu huong nay {good_context} doi voi quan ly moi truong do thi. "
-        f"Dien tich vung nguy co cao dat khoang {high_area:,.0f} ha, nen uu tien giam sat "
-        f"cac khu vuc co mat do xay dung cao, tang bo sung mang xanh va kiem soat mo rong be mat khong tham nuoc. "
-        f"Ket qua nay duoc tao tu so lieu vien tham da tinh trong he thong va van co the luu vao cache Supabase."
+        f"Báo cáo tự động offline:{reason_text} Tại khu vực {roi_name}, chỉ số {layer} "
+        f"đại diện cho {meta['env_context']} trong giai đoạn {first_year}-{last_year} có xu hướng {direction}, "
+        f"từ {fmt_val(layer, first_val)} lên {fmt_val(layer, last_val)}, tương ứng mức biến động {delta:+.3f}. "
+        f"Trạng thái hiện tại của khu vực được hệ thống phân loại là {status}, với mức rủi ro tổng hợp {risk_level}; "
+        f"vì vậy xu hướng này được đánh giá là {good_context} đối với quản lý môi trường đô thị. "
+        f"Nếu chỉ số {layer} tiếp tục biến động theo chiều bất lợi trong các năm tiếp theo, khu vực có thể đối mặt với "
+        f"áp lực gia tăng về sử dụng đất, suy giảm chất lượng vi khí hậu, hoặc mất cân bằng giữa bề mặt xây dựng và "
+        f"không gian sinh thái. Diện tích vùng nguy cơ cao hiện đạt khoảng {high_area:,.0f} ha, là nhóm không gian cần "
+        f"ưu tiên kiểm tra thực địa, đối chiếu với quy hoạch sử dụng đất và theo dõi bằng ảnh vệ tinh định kỳ. "
+        f"Về mặt quy hoạch, cần tập trung kiểm soát mở rộng bề mặt không thấm nước, bảo vệ các mảng xanh còn lại, "
+        f"tăng hành lang cây xanh ven trục giao thông và bố trí các giải pháp hạ nhiệt đô thị tại những khu vực có mật độ "
+        f"xây dựng cao. Đồng thời, kết quả này nên được sử dụng như một lớp dữ liệu cảnh báo sớm để hỗ trợ ra quyết định, "
+        f"không thay thế hoàn toàn khảo sát thực địa. Báo cáo được tạo từ số liệu viễn thám đã tính trong hệ thống và vẫn "
+        f"được lưu vào Supabase cache để lần truy vấn sau có thể tải nhanh hơn."
     )
 
 
@@ -1686,6 +1694,114 @@ def build_beautiful_report_html(
 </div>
 </body>
 </html>"""
+
+
+def build_pdf_report(
+    params,
+    result: dict,
+    analysis: dict,
+    ai_report: str,
+    first_y,
+    last_y,
+    l_mean_first,
+    l_mean_last,
+    delta_mean,
+    a_high,
+    status,
+) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    font_name = "Helvetica"
+    bold_font = "Helvetica-Bold"
+    for font_path in (r"C:\Windows\Fonts\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"):
+        if os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont("AppUnicode", font_path))
+                font_name = "AppUnicode"
+                bold_font = "AppUnicode"
+                break
+            except Exception:
+                pass
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        topMargin=1.4 * cm, bottomMargin=1.4 * cm,
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportTitle", fontName=bold_font, fontSize=18, leading=23, alignment=TA_CENTER, textColor=colors.HexColor("#1e293b"), spaceAfter=12))
+    styles.add(ParagraphStyle(name="SectionTitle", fontName=bold_font, fontSize=12.5, leading=16, textColor=colors.HexColor("#4f46e5"), spaceBefore=12, spaceAfter=7))
+    styles.add(ParagraphStyle(name="BodyVi", fontName=font_name, fontSize=9.5, leading=14, alignment=TA_JUSTIFY, textColor=colors.HexColor("#334155")))
+    styles.add(ParagraphStyle(name="SmallVi", fontName=font_name, fontSize=8.5, leading=12, textColor=colors.HexColor("#475569")))
+
+    def p(text, style="BodyVi"):
+        safe = html.escape(str(text if text is not None else "")).replace("\n", "<br/>")
+        return Paragraph(safe, styles[style])
+
+    def small_table(rows, widths=None):
+        table = Table([[p(c, "SmallVi") for c in row] for row in rows], colWidths=widths)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ]))
+        return table
+
+    roi = result.get("roi_names", "")
+    meta = CONFIG["layer_meta"][params.layer]
+    story = [
+        Paragraph(f"Báo cáo phân tích {params.layer} - {roi}", styles["ReportTitle"]),
+        small_table([
+            ["Quốc gia", params.country],
+            ["Khu vực", roi],
+            ["Giai đoạn", f"{first_y} - {last_y}"],
+            ["Tháng phân tích", params.month],
+            ["Chỉ số", f"{params.layer} - {meta['env_context']}"],
+        ], widths=[4.0 * cm, 13.0 * cm]),
+        Spacer(1, 10),
+        small_table([
+            ["Chỉ tiêu", "Giá trị"],
+            ["Giá trị khởi điểm", fmt_val(params.layer, l_mean_first)],
+            ["Giá trị hiện tại", fmt_val(params.layer, l_mean_last)],
+            ["Biến động trung bình", f"{delta_mean:+.4f}"],
+            ["Diện tích nguy cơ", f"{a_high:,.0f} Ha"],
+            ["Đánh giá", status],
+        ], widths=[6.0 * cm, 11.0 * cm]),
+    ]
+
+    if ai_report:
+        story += [Paragraph("Báo cáo chuyên sâu", styles["SectionTitle"]), p(ai_report)]
+
+    for key, label in [
+        ("technical", "Phân tích kỹ thuật"),
+        ("plain", "Diễn giải dễ hiểu"),
+        ("significance", "Ý nghĩa thực tế"),
+        ("warning", "Cảnh báo môi trường"),
+        ("recommendation", "Đề xuất quy hoạch"),
+    ]:
+        if analysis.get(key):
+            story += [Paragraph(label, styles["SectionTitle"]), p(analysis[key])]
+
+    trend_rows = [["Năm", params.layer]]
+    for row in result.get("trend_data", []):
+        trend_rows.append([row.get("Năm", ""), fmt_val(params.layer, row.get("Trị số"))])
+    if len(trend_rows) > 1:
+        story += [Paragraph("Xu hướng theo thời gian", styles["SectionTitle"]), small_table(trend_rows)]
+
+    doc.build(story)
+    return buf.getvalue()
 
 # ─── MAP BUILDING ─────────────────────────────────────────────────────────────
 def add_legend(m, layer):
@@ -2950,112 +3066,6 @@ def render_chart_clustering(result, params):
             f"({coolest['LST']:.1f}°C, nhóm *{coolest['Nhãn cụm']}*).")
 
 
-# ─── AI FEATURE: GEMINI VISION PHÂN TÍCH ẢNH VỆ TINH ─────────────────────────
-def call_gemini_vision_on_roi(params, result) -> str:
-    """
-    Render ảnh GEE phân loại của ROI hiện tại → gửi Gemini 2.5 Flash Vision phân tích.
-    """
-    try:
-        last_y = result.get("last_y") or sorted(params.years_multi)[-1]
-        roi = get_dynamic_roi(params.country, params.sub_regions)
-        geom = roi.geometry()
-        img = get_image(geom, last_y, params.month, params.layer)
-        classified = classify_global(img, params.layer, geom, last_y, params.month).clip(geom)
-        vis = classified.visualize(**CONFIG["vis"][params.layer])
-
-        url = vis.getThumbURL({
-            "region": geom.bounds(),
-            "dimensions": 768,
-            "format": "png",
-        })
-        r = requests.get(url, timeout=45)
-        r.raise_for_status()
-        img_bytes = r.content
-    except Exception as e:
-        return f"⚠️ Không lấy được ảnh từ Earth Engine: {e}"
-
-    meta = CONFIG["layer_meta"][params.layer]
-    class_labels = " / ".join(CONFIG["class_labels"][params.layer])
-    roi_name = result.get("roi_names") or params.country
-    prompt = (
-        f"Đây là bản đồ phân loại chỉ số viễn thám {params.layer} của khu vực {roi_name}, "
-        f"tháng {params.month}/{last_y}. Bảng màu phân thành 4 lớp: {class_labels}. "
-        f"Bối cảnh: {meta['env_context']}. "
-        f"Hãy phân tích bằng tiếng Việt trong 4-6 câu: "
-        f"(1) phân bố không gian các lớp trên ảnh, "
-        f"(2) chỉ ra các điểm nóng / vùng đáng chú ý, "
-        f"(3) nhận định xu hướng đô thị hóa hoặc rủi ro môi trường, "
-        f"(4) khuyến nghị quy hoạch ngắn gọn. "
-        f"Không dùng markdown, không gạch đầu dòng."
-    )
-
-    total_keys = len(GEMINI_KEYS_POOL)
-    if total_keys == 0:
-        return "⚠️ Chưa cấu hình Gemini API key trong Streamlit Secrets hoặc biến môi trường."
-
-    last_err = None
-    for _ in range(total_keys):
-        idx = st.session_state.current_key_idx
-        key = GEMINI_KEYS_POOL[idx]
-        try:
-            client = genai.Client(api_key=key)
-            resp = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[
-                    genai.types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
-                    prompt,
-                ],
-            )
-            if resp and resp.text:
-                return resp.text.strip()
-        except Exception as e:
-            last_err = e
-            err_msg = str(e).lower()
-            if (
-                "429" in err_msg
-                or "quota" in err_msg
-                or "resource_exhausted" in err_msg
-                or "api_key_invalid" in err_msg
-                or "api key expired" in err_msg
-                or "api key not valid" in err_msg
-                or "permission_denied" in err_msg
-            ):
-                st.session_state.current_key_idx = (idx + 1) % total_keys
-                print(f"[Vision Key Rotation] Key {idx} không dùng được -> chuyển sang {st.session_state.current_key_idx}")
-                time.sleep(0.5)
-                continue
-            return f"⚠️ Lỗi Gemini Vision: {e}"
-
-    return f"⚠️ Tất cả 4 API keys đều đã hết quota. (Lỗi cuối: {last_err})"
-
-
-def render_chart_vision(result, params):
-    """Tab Gemini Vision — phân tích ảnh GEE đã visualize."""
-    st.markdown("**🛰️ AI nhìn ảnh vệ tinh (Gemini 2.5 Vision)**")
-    st.caption("Gemini multimodal phân tích trực tiếp ảnh phân loại GEE của vùng đang chọn — "
-               "không chỉ đọc số liệu mà còn 'nhìn' phân bố không gian.")
-
-    last_y = result.get("last_y") or sorted(params.years_multi)[-1]
-    cache_key = ("vision_analysis_"
-                 f"{params.country}_{'_'.join(sorted(params.sub_regions or []))}_"
-                 f"{params.layer}_{params.month}_{last_y}")
-
-    if st.button("🛰️ Gửi ảnh cho Gemini Vision phân tích", use_container_width=True, key="vision_run_btn"):
-        with st.spinner("Đang render ảnh GEE & gửi lên Gemini Vision (~10-20s)..."):
-            analysis = call_gemini_vision_on_roi(params, result)
-            st.session_state[cache_key] = analysis
-
-    analysis = st.session_state.get(cache_key)
-    if analysis:
-        st.markdown(
-            f"<div style='padding:14px 16px;background:#f8fafc;border-left:3px solid #6366f1;"
-            f"border-radius:6px;line-height:1.75;font-size:14px;color:#1e293b;'>{analysis}</div>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.caption("⬆️ Bấm nút trên — Gemini sẽ 'nhìn' bản đồ và mô tả bằng lời.")
-
-
 # ─── MAIN UI LAYOUT ───────────────────────────────────────────────────────────
 st.markdown(
     "<div class='main-title'>"
@@ -3456,8 +3466,7 @@ with col_report:
         tab_labels = ["⛅ Thời tiết", "📈 Xu hướng", "📊 Mật độ",
                       "🥧 Cơ cấu", "🌡️ Đảo nhiệt", "🌐 So vùng",
                       "🔮 Dự báo 2035", "🎯 Điểm Rủi Ro",
-                      "🧭 Phân cụm AI", "🛰️ AI nhìn ảnh",
-                      "💬 Hỏi AI", "📥 Tải Về"]
+                      "🧭 Phân cụm AI", "💬 Hỏi AI", "📥 Tải Về"]
         tabs = st.tabs(tab_labels)
 
         with tabs[0]:
@@ -3489,12 +3498,9 @@ with col_report:
             render_chart_clustering(result, params)
 
         with tabs[9]:
-            render_chart_vision(result, params)
-
-        with tabs[10]:
             render_chart_chat(result, params)
 
-        with tabs[11]:
+        with tabs[10]:
             st.markdown("<div style='font-size:12px;color:#64748b;margin-bottom:10px;'>Xuất dữ liệu phân tích</div>", unsafe_allow_html=True)
 
             if result["trend_data"]:
@@ -3513,6 +3519,46 @@ with col_report:
             analysis_dict = auto_academic_analysis(
                 params.layer, l_mean_first, l_mean_last, a_high, result["roi_names"]
             )
+            try:
+                pdf_bytes = build_pdf_report(
+                    params=params,
+                    result=result,
+                    analysis=analysis_dict,
+                    ai_report=st.session_state.get("cached_report") or "",
+                    first_y=first_y,
+                    last_y=last_y,
+                    l_mean_first=l_mean_first,
+                    l_mean_last=l_mean_last,
+                    delta_mean=delta_mean,
+                    a_high=a_high,
+                    status=status,
+                )
+                st.download_button("📄 PDF — Báo cáo tổng hợp",
+                                   data=pdf_bytes,
+                                   file_name=f"Bao_cao_{result['roi_names']}_{params.layer}.pdf",
+                                   mime="application/pdf", use_container_width=True)
+            except Exception as e:
+                st.warning(f"Không thể tạo PDF: {e}")
+
+            html_report = build_beautiful_report_html(
+                params=params,
+                result=result,
+                analysis=analysis_dict,
+                ai_report=st.session_state.get("cached_report") or "",
+                first_y=first_y,
+                last_y=last_y,
+                l_mean_first=l_mean_first,
+                l_mean_last=l_mean_last,
+                delta_mean=delta_mean,
+                a_high=a_high,
+                status=status,
+                color_st=color_st,
+            )
+            st.download_button("🌐 HTML — Báo cáo đầy đủ",
+                               data=html_report.encode("utf-8"),
+                               file_name=f"Bao_cao_{result['roi_names']}_{params.layer}.html",
+                               mime="text/html", use_container_width=True)
+
             full_text = (
                 f"=== Phân tích Học thuật: {params.layer} — {result['roi_names']} ===\n\n"
                 + "\n\n".join([f"[{k.upper()}]\n{v}" for k, v in analysis_dict.items()])
