@@ -383,6 +383,95 @@ div[data-testid="stButton"] button[kind="primary"]:hover {
   font-size: 12.5px; line-height: 1.65; color: #334155; text-align: justify;
 }
 
+/* Chat Assistant UI */
+.chat-shell {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.chat-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.chat-title {
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0;
+}
+.chat-subtitle {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  margin-top: 3px;
+}
+.chat-mode {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--success);
+  background: rgba(5,150,105,0.10);
+  border: 1px solid rgba(5,150,105,0.20);
+  border-radius: 999px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+.chat-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chat-chip {
+  font-size: 10.5px;
+  line-height: 1.2;
+  color: #334155;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 8px;
+  max-width: 100%;
+}
+.chat-chip strong { color: var(--text); }
+.chat-section-title {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  margin: 10px 0 6px;
+}
+.chat-empty {
+  border: 1px dashed #cbd5e1;
+  background: #f8fafc;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 8px 0 10px;
+}
+.chat-empty strong { color: var(--text); }
+.chat-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 12px 0 8px;
+}
+div[data-testid="stChatMessage"] {
+  border-radius: 12px !important;
+  border: 1px solid rgba(226,232,240,0.8) !important;
+  background: #ffffff !important;
+}
+div[data-testid="stChatInput"] {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
 /* ── Academic Analysis Boxes ─────────────────── */
 .analysis-box {
   background: var(--surface); border: 1px solid var(--border);
@@ -1612,16 +1701,16 @@ def _build_chat_context(lat, lon, address, params, result, weather):
 def get_chat_suggested_questions(params=None, result=None, has_click: bool = False) -> list:
     layer = params.layer if params else "chỉ số"
     questions = [
-        f"Tóm tắt nhanh dữ liệu {layer} hiện tại",
-        f"Xu hướng {layer} đang tăng hay giảm?",
-        "Vùng nào rủi ro cao nhất?",
-        "So sánh các vùng đang chọn",
-        "Dự báo đến 2035 có đáng lo không?",
-        "Nên ưu tiên giải pháp quy hoạch nào?",
+        f"Tóm tắt {layer}",
+        f"Xu hướng {layer}",
+        "So sánh vùng",
+        "Rủi ro cao nhất",
+        "Dự báo 2035",
+        "Khuyến nghị quy hoạch",
     ]
     if has_click:
-        questions.insert(0, "Điểm tôi vừa click có gì đáng chú ý?")
-        questions.insert(1, "Thời tiết tuần tới có ảnh hưởng gì không?")
+        questions.insert(0, "Điểm vừa click")
+        questions.insert(1, "Thời tiết tuần tới")
     return questions[:8]
 
 
@@ -2893,53 +2982,69 @@ def render_chart_chat(result, params):
         loc_label = "🌏 Mặc định: trung tâm Việt Nam"
         loc_color = "#94a3b8"
 
-    # Header: vị trí + nút clear
-    hcol1, hcol2 = st.columns([4, 1])
-    with hcol1:
-        st.markdown(
-            f"<div style='font-size:11.5px;color:{loc_color};font-weight:600;"
-            f"padding:6px 10px;background:#f8fafc;border-radius:8px;"
-            f"border-left:3px solid {loc_color};margin-bottom:8px;'>"
-            f"{loc_label}</div>",
-            unsafe_allow_html=True,
-        )
-    with hcol2:
-        if st.button("🗑️ Xoá", key="chat_clear", use_container_width=True,
+    # Header + data context
+    context_place = html.escape(address[:96] if address else "Vùng đang phân tích")
+    layer_label = html.escape(params.layer if params else "N/A")
+    period_label = html.escape(
+        f"{result.get('first_y', '?')}-{result.get('last_y', '?')}" if result else "Chưa có"
+    )
+    month_label = html.escape(str(params.month if params else "N/A"))
+    source_label = "Điểm click" if click else "ROI trung tâm"
+    st.markdown(
+        f"""
+        <div class="chat-shell">
+          <div class="chat-top">
+            <div>
+              <div class="chat-title">Trợ lý dữ liệu GIS</div>
+              <div class="chat-subtitle">Hỏi nhanh theo số liệu đang hiển thị. Các câu cơ bản trả lời tức thì, không chờ API.</div>
+            </div>
+            <div class="chat-mode">DATA MODE</div>
+          </div>
+          <div class="chat-chip-row">
+            <span class="chat-chip"><strong>Vị trí</strong> · {context_place}</span>
+            <span class="chat-chip"><strong>Nguồn</strong> · {source_label}</span>
+            <span class="chat-chip"><strong>Lớp</strong> · {layer_label}</span>
+            <span class="chat-chip"><strong>Giai đoạn</strong> · {period_label}</span>
+            <span class="chat-chip"><strong>Tháng</strong> · {month_label}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    clear_col, spacer_col = st.columns([1, 5])
+    with clear_col:
+        if st.button("Xoá chat", key="chat_clear", use_container_width=True,
                      help="Xoá lịch sử chat"):
             st.session_state["chat_history"] = []
             st.rerun(scope="fragment")
 
-    # Hint nếu chưa có history
     if not st.session_state["chat_history"]:
-        st.info("👋 Hỏi tôi gì cũng được về **thời tiết**, **môi trường**, **đô thị** "
-                "ở vị trí này. Tôi sẽ trả lời bằng dữ liệu thật từ Earth Engine + "
-                "Open-Meteo.\n\n**Ví dụ:**\n"
-                "- *Thời tiết tuần tới có mưa không?*\n"
-                "- *Vùng này đô thị hoá nhanh hay chậm?*\n"
-                "- *Nên trồng cây ở đây không?*\n"
-                "- *So sánh với 5 năm trước thì sao?*")
+        st.markdown(
+            "<div class='chat-empty'><strong>Bắt đầu bằng câu hỏi nhanh bên dưới.</strong> "
+            "Bạn có thể hỏi về xu hướng, vùng rủi ro, dự báo 2035, thời tiết hoặc khuyến nghị quy hoạch.</div>",
+            unsafe_allow_html=True,
+        )
 
     quick_prompt = None
     suggestions = get_chat_suggested_questions(params, result, has_click=bool(click))
-    st.markdown(
-        "<div style='font-size:11px;font-weight:700;color:#64748b;margin:6px 0 4px;"
-        "text-transform:uppercase;letter-spacing:0.5px;'>Câu hỏi nhanh về dữ liệu</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div class='chat-section-title'>Câu hỏi nhanh</div>", unsafe_allow_html=True)
     q_cols = st.columns(2)
     for i, question in enumerate(suggestions):
         if q_cols[i % 2].button(question, key=f"quick_chat_{i}", use_container_width=True):
             quick_prompt = question
 
+    st.markdown("<div class='chat-divider'></div>", unsafe_allow_html=True)
+
     # Render lịch sử
     for msg in st.session_state["chat_history"]:
-        avatar = "🧑" if msg["role"] == "user" else "🤖"
+        avatar = "👤" if msg["role"] == "user" else "◎"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
     # Input
     user_input = st.chat_input(
-        "Hỏi về thời tiết, môi trường, đô thị... ",
+        "Nhập câu hỏi về dữ liệu, xu hướng, rủi ro, dự báo 2035...",
         key="chat_input_main",
     )
     if quick_prompt:
@@ -2949,11 +3054,11 @@ def render_chart_chat(result, params):
         st.session_state["chat_history"].append(
             {"role": "user", "content": user_input}
         )
-        with st.chat_message("user", avatar="🧑"):
+        with st.chat_message("user", avatar="👤"):
             st.markdown(user_input)
 
-        with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("🤖 Đang phân tích dữ liệu thật..."):
+        with st.chat_message("assistant", avatar="◎"):
+            with st.spinner("Đang đọc dữ liệu đang hiển thị..."):
                 # Lấy weather (cache 30min đã có sẵn)
                 try:
                     weather = get_forecast_weather(lat, lon)
