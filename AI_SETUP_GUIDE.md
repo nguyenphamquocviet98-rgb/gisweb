@@ -11,9 +11,9 @@
 ### 1. Gemini (Already Configured)
 Keepsome existing keys in `.env` or Streamlit Secrets:
 ```
-GEMINI_KEY_1=sk-xxx...
-GEMINI_KEY_2=sk-yyy...
-GEMINI_API_KEY=sk-zzz...
+GEMINI_KEY_1=AIza...
+GEMINI_KEY_2=AIza...
+GEMINI_API_KEY=AIza...
 ```
 
 ### 2. OpenAI (New - Optional)
@@ -32,20 +32,36 @@ OPENAI_API_KEY=sk-proj-xxx...
   ```
 
 ### 3. Streamlit Secrets (For Cloud Deployment)
-Create `.streamlit/secrets.toml`:
+Create `.streamlit/secrets.toml` locally, or paste the same TOML into Streamlit Cloud
+`App settings` -> `Secrets`.
 ```toml
 [gcp_service_account]
-project_id = "..."
-client_email = "..."
-private_key = "..."
+type = "service_account"
+project_id = "your-gcp-project-id"
+private_key_id = "your-private-key-id"
+client_email = "your-service-account@your-gcp-project-id.iam.gserviceaccount.com"
+client_id = "your-client-id"
+auth_uri = "https://accounts.google.com/o/oauth2/auth"
+token_uri = "https://oauth2.googleapis.com/token"
+auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/your-service-account%40your-gcp-project-id.iam.gserviceaccount.com"
+universe_domain = "googleapis.com"
+private_key = """-----BEGIN PRIVATE KEY-----
+paste-private-key-lines-here
+-----END PRIVATE KEY-----"""
 
 [gemini]
-GEMINI_KEY_1 = "sk-xxx"
-GEMINI_API_KEY = "sk-yyy"
+GEMINI_KEY_1 = "AIza..."
+GEMINI_API_KEY = "AIza..."
 
 [openai]
 api_key = "sk-proj-zzz"
 ```
+
+Important TOML rules:
+- Keep each `key = "value"` on one line, except `private_key`, which should use triple quotes as shown above.
+- Do not put `private_key_id =` on one line and the value on the next line.
+- After saving Streamlit Cloud Secrets, wait about 1 minute, then reboot/rerun the app.
 
 ## 🚀 How It Works
 

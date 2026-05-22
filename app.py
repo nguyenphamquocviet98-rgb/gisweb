@@ -11,6 +11,11 @@ import time, json, os, hashlib, requests, html, re, random
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("USE_FOLIUM", "1")  # geemap: chọn folium backend trước khi import
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -49,23 +54,41 @@ st.set_page_config(
 )
 
 # ─── EARTH ENGINE INITIALIZATION ───────────────────────────────────────────────
+def get_streamlit_secret(name: str, default=None):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return default
+
+
+def load_gee_service_account():
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+        if all(k in st.secrets for k in ("client_email", "private_key", "project_id")):
+            return dict(st.secrets)
+    except Exception:
+        pass
+
+    credentials_json = get_streamlit_secret("GEE_CREDENTIALS") or os.environ.get("GEE_CREDENTIALS", "")
+    if credentials_json:
+        try:
+            return json.loads(str(credentials_json))
+        except Exception:
+            st.error("❌ `GEE_CREDENTIALS` không phải JSON hợp lệ.")
+            return None
+
+    return None
+
+
 def initialize_earth_engine():
     """Initialize Google Earth Engine using Streamlit Secrets."""
     project_id = os.environ.get("GEE_PROJECT", "awesome-tube-470513-s5")
 
-    try:
-        if "gcp_service_account" in st.secrets:
-            service_account_info = st.secrets["gcp_service_account"]
-            has_service_account = True
-        elif all(k in st.secrets for k in ("client_email", "private_key", "project_id")):
-            service_account_info = st.secrets
-            has_service_account = True
-        else:
-            service_account_info = None
-            has_service_account = False
-    except Exception:
-        service_account_info = None
-        has_service_account = False
+    service_account_info = load_gee_service_account()
+    has_service_account = bool(service_account_info)
 
     if has_service_account:
         try:
@@ -137,11 +160,6 @@ CONFIG = {
     },
 }
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
 # ─── GEMINI MULTI-KEY CONFIGURATION (KEY ROTATION) ───────────────────────────
 def get_secret_or_env(name: str, default: str = "") -> str:
     """Read config from Streamlit Secrets first, then environment variables."""
