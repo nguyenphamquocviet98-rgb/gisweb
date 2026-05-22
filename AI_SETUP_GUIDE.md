@@ -35,6 +35,10 @@ OPENAI_API_KEY=sk-proj-xxx...
 Create `.streamlit/secrets.toml` locally, or paste the same TOML into Streamlit Cloud
 `App settings` -> `Secrets`.
 ```toml
+# Optional. Default is instant: report is generated immediately from computed GIS data.
+# Set to "api" only if you want to wait for Gemini/OpenAI text generation.
+AI_REPORT_MODE = "instant"
+
 [gcp_service_account]
 type = "service_account"
 project_id = "your-gcp-project-id"

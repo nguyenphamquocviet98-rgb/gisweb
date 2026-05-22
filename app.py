@@ -1298,26 +1298,57 @@ AI_PROVIDERS = {
 def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None): # This function is kept for fallback
     meta = CONFIG["layer_meta"][layer]
     delta = (last_val or 0) - (first_val or 0)
+    abs_delta = abs(delta)
+    pct_delta = (delta / abs(first_val) * 100) if first_val not in (None, 0) else None
     direction = "tăng" if delta > 0 else "giảm" if delta < 0 else "gần như không đổi"
     status, _ = layer_status(layer, last_val)
-    good_context = "tích cực" if (delta >= 0) == meta["good_high"] else "cần theo dõi chặt chẽ"
-    reason_text = f" Báo cáo này được tạo bằng bộ phân tích nội bộ vì Gemini đang lỗi: {reason}." if reason else ""
+    good_context = "tích cực" if (delta >= 0) == meta["good_high"] else "bất lợi và cần theo dõi chặt chẽ"
+    reason_text = f" Chế độ tạo báo cáo tức thì đang được dùng: {reason}." if reason else ""
     risk_level = "cao" if status == "Cảnh báo" else "trung bình" if status == "Trung bình" else "thấp"
+    intensity = "mạnh" if abs_delta >= 0.15 else "vừa" if abs_delta >= 0.05 else "nhẹ"
+    pct_text = f", tương đương {pct_delta:+.1f}%" if pct_delta is not None else ""
+
+    if layer == "NDVI":
+        indicator_meaning = "sức khỏe thảm thực vật, độ phủ xanh và khả năng điều hòa vi khí hậu"
+        adverse_scenario = (
+            "Nếu xu hướng suy giảm tiếp diễn, khu vực có nguy cơ mất thêm mảng xanh chức năng, "
+            "tăng dòng chảy mặt và giảm khả năng hấp thụ nhiệt."
+        )
+        priority_actions = (
+            "ưu tiên bảo vệ các lõi xanh hiện hữu, phục hồi hành lang cây xanh, tăng cây bóng mát "
+            "trên các trục giao thông và kiểm soát chuyển đổi đất xanh sang bề mặt cứng"
+        )
+    elif layer == "NDBI":
+        indicator_meaning = "mức độ xây dựng, bê tông hóa và áp lực bề mặt không thấm nước"
+        adverse_scenario = (
+            "Nếu NDBI tiếp tục tăng, rủi ro chính là lan rộng bề mặt xây dựng, suy giảm thấm nước, "
+            "gia tăng đảo nhiệt và áp lực thoát nước đô thị."
+        )
+        priority_actions = (
+            "kiểm soát mật độ xây dựng, bổ sung hạ tầng xanh-xanh dương, dùng vật liệu thấm nước "
+            "và khoanh vùng các điểm nóng bê tông hóa để giám sát"
+        )
+    else:
+        indicator_meaning = "nhiệt độ bề mặt đất và cường độ đảo nhiệt đô thị"
+        adverse_scenario = (
+            "Nếu LST duy trì ở mức cao, khu vực có nguy cơ gia tăng stress nhiệt, giảm tiện nghi vi khí hậu "
+            "và tăng nhu cầu năng lượng làm mát."
+        )
+        priority_actions = (
+            "tăng che phủ cây xanh, giảm bề mặt hấp thụ nhiệt, bổ sung mặt nước/hạ tầng xanh "
+            "và ưu tiên can thiệp tại các vùng nóng liên tục"
+        )
 
     return (
-        f"Báo cáo tự động :{reason_text} Tại khu vực {roi_name}, chỉ số {layer} "
-        f"đại diện cho {meta['env_context']} trong giai đoạn {first_year}-{last_year} có xu hướng {direction}, "
-        f"từ {fmt_val(layer, first_val)} lên {fmt_val(layer, last_val)}, tương ứng mức biến động {delta:+.3f}. "
-        f"Trạng thái hiện tại của khu vực được hệ thống phân loại là {status}, với mức rủi ro tổng hợp {risk_level}; "
-        f"vì vậy xu hướng này được đánh giá là {good_context} đối với quản lý môi trường đô thị. "
-        f"Nếu chỉ số {layer} tiếp tục biến động theo chiều bất lợi trong các năm tiếp theo, khu vực có thể đối mặt với "
-        f"áp lực gia tăng về sử dụng đất, suy giảm chất lượng vi khí hậu, hoặc mất cân bằng giữa bề mặt xây dựng và "
-        f"không gian sinh thái. Diện tích vùng nguy cơ cao hiện đạt khoảng {high_area:,.0f} ha, là nhóm không gian cần "
-        f"ưu tiên kiểm tra thực địa, đối chiếu với quy hoạch sử dụng đất và theo dõi bằng ảnh vệ tinh định kỳ. "
-        f"Về mặt quy hoạch, cần tập trung kiểm soát mở rộng bề mặt không thấm nước, bảo vệ các mảng xanh còn lại, "
-        f"tăng hành lang cây xanh ven trục giao thông và bố trí các giải pháp hạ nhiệt đô thị tại những khu vực có mật độ "
-        f"xây dựng cao. Đồng thời, kết quả này nên được sử dụng như một lớp dữ liệu cảnh báo sớm để hỗ trợ ra quyết định, "
-        f"không thay thế hoàn toàn khảo sát thực địa. Báo cáo được tạo từ số liệu viễn thám đã tính trong hệ thống."
+        f"Đánh giá chuyên gia tức thì cho {roi_name}: chỉ số {layer} phản ánh {indicator_meaning}. "
+        f"Trong giai đoạn {first_year}-{last_year}, giá trị trung bình {direction} từ {fmt_val(layer, first_val)} "
+        f"đến {fmt_val(layer, last_val)}, biến động {delta:+.3f}{pct_text}; cường độ biến động được xếp mức {intensity}. "
+        f"Trạng thái năm cuối là {status}, mức rủi ro tổng hợp {risk_level}, và xu hướng hiện được đánh giá là {good_context} "
+        f"đối với quản lý đô thị. Diện tích nhóm nguy cơ cao đạt khoảng {high_area:,.0f} ha, cần được xem là vùng ưu tiên "
+        f"cho kiểm tra thực địa, đối chiếu quy hoạch sử dụng đất và giám sát ảnh vệ tinh định kỳ. {adverse_scenario} "
+        f"Kịch bản hành động khuyến nghị là {priority_actions}. Về ra quyết định, kết quả này nên được dùng như lớp cảnh báo "
+        f"sớm có căn cứ định lượng: ưu tiên khu vực có rủi ro cao, kiểm tra nguyên nhân tại hiện trường, sau đó lượng hóa hiệu quả "
+        f"can thiệp qua cùng chỉ số {layer} trong các kỳ tiếp theo.{reason_text}"
     )
 
 def call_ai_with_retry(prompt: str, system_instruction: str = None, max_retries: int = 3) -> Tuple[str, str, bool]:
@@ -1388,6 +1419,15 @@ def generate_gemini_report(layer, first_year, last_year, first_val, last_val, hi
     Tạo báo cáo với fallback chain:
     1. Gemini (primary) → OpenAI (secondary) → Local generation (fallback)
     """
+    ai_report_mode = str(get_streamlit_secret("AI_REPORT_MODE", os.environ.get("AI_REPORT_MODE", "instant"))).strip().lower()
+    if ai_report_mode in ("instant", "local", "offline", ""):
+        st.session_state.last_report_provider = "Expert System"
+        st.session_state.last_report_is_ai = False
+        return generate_local_report(
+            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
+            "không chờ API để đảm bảo báo cáo hiển thị ngay và chỉ dùng số liệu đã tính trong hệ thống"
+        )
+
     report_text, provider_used, is_ai_generated = get_cached_ai_report(
         layer, roi_name, first_year, last_year, first_val, last_val, high_area
     )
@@ -3594,17 +3634,17 @@ with col_report:
                     status_msg = f"{status_icon} Báo cáo được tạo bởi AI: **{provider}**"
                     st.success(status_msg, icon="🤖")
                 else:
-                    status_icon = "⚠️"
-                    status_msg = f"{status_icon} AI tạm gặp sự cố. Sử dụng báo cáo hệ thống."
-                    st.warning(status_msg)
+                    status_msg = f"✅ Báo cáo chuyên gia tức thì: **{provider}**"
+                    st.success(status_msg)
                 return
 
             if not ai_trigger:
-                if st.button("🤖 Sinh báo cáo AI (Gemini/OpenAI)", use_container_width=True, key="btn_gen_ai"):
+                if st.button("🤖 Sinh báo cáo chuyên gia tức thì", use_container_width=True, key="btn_gen_ai"):
                     st.session_state["ai_trigger"] = True
-                return
+                else:
+                    return
 
-            with st.spinner("🤖 AI đang phân tích... (thử Gemini, rồi OpenAI nếu cần)"):
+            with st.spinner("🤖 Đang dựng báo cáo từ số liệu phân tích..."):
                 report = generate_gemini_report(params.layer, first_y, last_y, l_mean_first, l_mean_last, a_high, result["roi_names"])
                 st.session_state["cached_report"] = report
 
