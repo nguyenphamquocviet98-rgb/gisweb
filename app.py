@@ -1093,12 +1093,25 @@ def forecast_land_use(df_hist: pd.DataFrame,
     return out
 
 
+def area_value(value, default: float = 0.0) -> float:
+    """Return a finite area value for chart math."""
+    try:
+        if value is None or pd.isna(value):
+            return default
+        value = float(value)
+        if not np.isfinite(value):
+            return default
+        return value
+    except (TypeError, ValueError):
+        return default
+
+
 def build_2035_scenario_summary(layer: str, labels: list, classes: list,
                                 cur_row: pd.Series, fc: dict,
                                 last_y: int, avg_mape: Optional[float] = None) -> dict:
     """Build a compact scenario layer for the 2035 forecast tab."""
-    total_now = sum(float(cur_row.get(c) or 0) for c in classes)
-    values_2035 = {c: float(fc.get(2035, {}).get(c) or 0) for c in classes}
+    total_now = sum(area_value(cur_row.get(c)) for c in classes)
+    values_2035 = {c: area_value(fc.get(2035, {}).get(c)) for c in classes}
     total_2035 = sum(values_2035.values())
 
     bad_classes = {
@@ -1108,9 +1121,9 @@ def build_2035_scenario_summary(layer: str, labels: list, classes: list,
     }[layer]
     good_classes = tuple(c for c in classes if c not in bad_classes)
 
-    bad_now = sum(float(cur_row.get(c) or 0) for c in bad_classes)
+    bad_now = sum(area_value(cur_row.get(c)) for c in bad_classes)
     bad_2035 = sum(values_2035.get(c, 0) for c in bad_classes)
-    good_now = sum(float(cur_row.get(c) or 0) for c in good_classes)
+    good_now = sum(area_value(cur_row.get(c)) for c in good_classes)
     good_2035 = sum(values_2035.get(c, 0) for c in good_classes)
 
     bad_delta = bad_2035 - bad_now
@@ -1120,8 +1133,8 @@ def build_2035_scenario_summary(layer: str, labels: list, classes: list,
 
     uncertainty = 0.0
     for c in bad_classes:
-        lo = float(fc.get(2035, {}).get(c + "_lo") or values_2035.get(c, 0))
-        hi = float(fc.get(2035, {}).get(c + "_hi") or values_2035.get(c, 0))
+        lo = area_value(fc.get(2035, {}).get(c + "_lo"), values_2035.get(c, 0))
+        hi = area_value(fc.get(2035, {}).get(c + "_hi"), values_2035.get(c, 0))
         uncertainty += max(0.0, hi - lo)
     uncertainty_pct = (uncertainty / total_2035 * 100) if total_2035 > 0 else 0
 
@@ -1151,7 +1164,7 @@ def build_2035_scenario_summary(layer: str, labels: list, classes: list,
 
     cls_rows = []
     for c, lbl in zip(classes, labels):
-        now = float(cur_row.get(c) or 0)
+        now = area_value(cur_row.get(c))
         fut = values_2035.get(c, 0)
         delta = fut - now
         cls_rows.append((lbl, c, now, fut, delta, (delta / now * 100) if now > 0 else 0))
@@ -3387,8 +3400,9 @@ def render_chart_forecast(result, params):
     cols = st.columns(3)
     for col, (title, data) in zip(cols, snapshots):
         with col:
-            values = [data.get(c) or 0 for c in classes]
-            if sum(values) == 0:
+            values = [area_value(data.get(c)) for c in classes]
+            total_area = sum(values)
+            if total_area <= 0:
                 col.info(f"_{title}_\n\nThiếu dữ liệu")
                 continue
             pie = go.Figure(go.Pie(
@@ -3401,7 +3415,7 @@ def render_chart_forecast(result, params):
                 height=180, margin=dict(l=5, r=5, t=25, b=5), showlegend=False,
                 title=dict(text=title, font_size=11, x=0.5,
                            font_color="#475569"),
-                annotations=[dict(text=f"{int(sum(values)):,}<br>Ha",
+                annotations=[dict(text=f"{int(total_area):,}<br>Ha",
                                   x=0.5, y=0.5, font_size=10,
                                   font_color="#0f172a", showarrow=False)],
                 **PD,
@@ -3452,7 +3466,7 @@ def render_chart_forecast(result, params):
 
     scen_cols = st.columns(3)
     scen_colors = ["#0891b2", "#059669", "#dc2626"]
-    total_2035 = max(sum(float(fc.get(2035, {}).get(c) or 0) for c in classes), 1)
+    total_2035 = max(sum(area_value(fc.get(2035, {}).get(c)) for c in classes), 1)
     for col, item, color in zip(scen_cols, scenario["scenarios"], scen_colors):
         title, value, note = item
         pct_total = value / total_2035 * 100
@@ -3478,8 +3492,8 @@ def render_chart_forecast(result, params):
 
     insights = []
     for cls, lbl in zip(classes, labels):
-        cur = cur_row[cls] or 0
-        fut = fc.get(2035, {}).get(cls)
+        cur = area_value(cur_row[cls])
+        fut = area_value(fc.get(2035, {}).get(cls), default=None)
         if fut is None:
             continue
         delta = fut - cur
