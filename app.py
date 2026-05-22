@@ -7,7 +7,7 @@
 """
 
 # ─── IMPORTS ─────────────────────────────────────────────────────────────────
-import time, json, os, hashlib, requests, html, re
+import time, json, os, hashlib, requests, html, re, random
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 os.environ.setdefault("USE_FOLIUM", "1")  # geemap: chọn folium backend trước khi import
@@ -34,6 +34,11 @@ import streamlit as st
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from google import genai
+try:
+    from openai import OpenAI as OpenAIClient
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -166,6 +171,20 @@ GEMINI_API_KEY = GEMINI_KEYS_POOL[0] if GEMINI_KEYS_POOL else ""
 # Biến toàn cục theo dõi xem đang dùng tới key thứ mấy trong danh sách
 if "current_key_idx" not in st.session_state:
     st.session_state.current_key_idx = 0
+
+# ─── OPENAI CONFIGURATION ───────────────────────────────────────────────────
+def load_openai_key() -> str:
+    """Load OpenAI API key from Streamlit Secrets or environment."""
+    try:
+        if "OPENAI_API_KEY" in st.secrets:
+            return str(st.secrets["OPENAI_API_KEY"]).strip()
+        if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+            return str(st.secrets["openai"]["api_key"]).strip()
+    except Exception:
+        pass
+    return os.environ.get("OPENAI_API_KEY", "").strip()
+
+OPENAI_API_KEY = load_openai_key() if OPENAI_AVAILABLE else ""
 
 
 # ─── GOOGLE EARTH ENGINE INIT ────────────────────────────────────────────────
@@ -1188,8 +1207,76 @@ def generate_timelapse_url(
     except Exception as e:
         return None
 
+# ─── AI PROVIDER ABSTRACTION ────────────────────────────────────────────────
+class AIProvider:
+    """Base class for AI providers."""
+    def generate(self, prompt: str, system_instruction: str = None) -> Tuple[str, str]:
+        """Return (response_text, provider_name)."""
+        raise NotImplementedError
+
+class GeminiProvider(AIProvider):
+    """Gemini AI provider with key rotation."""
+    def generate(self, prompt: str, system_instruction: str = None) -> Tuple[str, str]:
+        total_keys = len(GEMINI_KEYS_POOL)
+        if total_keys == 0:
+            raise RuntimeError("Chưa cấu hình Gemini API key.")
+        
+        last_err = None
+        for attempt in range(total_keys):
+            idx = (st.session_state.current_key_idx + attempt) % total_keys
+            current_key = GEMINI_KEYS_POOL[idx]
+            
+            try:
+                client = genai.Client(api_key=current_key)
+                config_params = {}
+                if system_instruction:
+                    config_params["system_instruction"] = system_instruction
+                
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=genai.types.GenerateContentConfig(**config_params) if config_params else None,
+                )
+                
+                if response and response.text:
+                    st.session_state.current_key_idx = idx
+                    return response.text, "Gemini"
+            except Exception as e:
+                last_err = e
+                err_msg = str(e).lower()
+                if any(x in err_msg for x in ["429", "quota", "resource_exhausted", "invalid"]):
+                    continue
+                raise
+        
+        raise RuntimeError(f"Gemini API failed: {last_err}")
+
+class OpenAIProvider(AIProvider):
+    """OpenAI ChatGPT provider."""
+    def generate(self, prompt: str, system_instruction: str = None) -> Tuple[str, str]:
+        if not OPENAI_AVAILABLE or not OPENAI_API_KEY:
+            raise RuntimeError("OpenAI không khả dụng hoặc chưa cấu hình.")
+        
+        client = OpenAIClient(api_key=OPENAI_API_KEY)
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=800
+        )
+        
+        return response.choices[0].message.content, "OpenAI"
+
 # ─── GEMINI AI REPORT ────────────────────────────────────────────────────────
 GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
+AI_PROVIDERS = {
+    "gemini": GeminiProvider(),
+    "openai": OpenAIProvider() if OPENAI_AVAILABLE else None,
+}
 def generate_local_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name, reason=None): # This function is kept for fallback
     meta = CONFIG["layer_meta"][layer]
     delta = (last_val or 0) - (first_val or 0)
@@ -1215,61 +1302,49 @@ def generate_local_report(layer, first_year, last_year, first_val, last_val, hig
         f"không thay thế hoàn toàn khảo sát thực địa. Báo cáo được tạo từ số liệu viễn thám đã tính trong hệ thống."
     )
 
-def call_gemini_with_rotation(model_name: str, contents: str, system_instruction: str = None) -> str:
+def call_ai_with_retry(prompt: str, system_instruction: str = None, max_retries: int = 3) -> Tuple[str, str, bool]:
     """
-    Gọi Gemini API và tự động xoay vòng qua 4 key trong GEMINI_KEYS_POOL khi 1 key hết quota.
+    Gọi AI provider với retry logic (exponential backoff).
+    Return: (text, provider_name, is_ai_generated)
+    Fallback chain: Gemini → OpenAI → Local generation
     """
-    total_keys = len(GEMINI_KEYS_POOL)
-    if total_keys == 0:
-        raise RuntimeError("Chưa cấu hình Gemini API key trong Streamlit Secrets hoặc biến môi trường.")
+    providers_order = ["gemini"]
+    if OPENAI_AVAILABLE and OPENAI_API_KEY:
+        providers_order.append("openai")
+    
+    for provider_name in providers_order:
+        for attempt in range(max_retries):
+            try:
+                provider = AI_PROVIDERS.get(provider_name)
+                if not provider:
+                    continue
+                
+                text, used_provider = provider.generate(prompt, system_instruction)
+                print(f"✅ {used_provider} success on attempt {attempt + 1}")
+                return text, used_provider, True
+            
+            except Exception as e:
+                err_msg = str(e).lower()
+                wait_time = (2 ** attempt) + random.uniform(0, 1)  # exponential backoff
+                
+                is_transient = any(x in err_msg for x in ["503", "unavailable", "deadline_exceeded", "timeout"])
+                if is_transient and attempt < max_retries - 1:
+                    print(f"⏳ {provider_name} transient error, retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+                
+                print(f"❌ {provider_name} failed: {e}")
+                break
+    
+    # All AI providers failed
+    return None, "Local", False
 
-    last_err = None
-    for _ in range(total_keys):
-        idx = st.session_state.current_key_idx % total_keys
-        st.session_state.current_key_idx = idx
-        current_key = GEMINI_KEYS_POOL[idx]
-
-        try:
-            client = genai.Client(api_key=current_key)
-
-            config_params = {}
-            if system_instruction:
-                config_params["system_instruction"] = system_instruction
-
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=genai.types.GenerateContentConfig(**config_params) if config_params else None,
-            )
-
-            if response and response.text:
-                return response.text
-
-        except Exception as e:
-            last_err = e
-            err_msg = str(e).lower()
-            key_can_rotate = (
-                "429" in err_msg
-                or "quota" in err_msg
-                or "resource_exhausted" in err_msg
-                or "api_key_invalid" in err_msg
-                or "api key expired" in err_msg
-                or "api key not valid" in err_msg
-                or "permission_denied" in err_msg
-            )
-            if key_can_rotate:
-                next_idx = (idx + 1) % total_keys
-                st.session_state.current_key_idx = next_idx
-                print(f"[Key Rotation] Key index {idx} không dùng được. Chuyển sang Key index {next_idx}...")
-                time.sleep(0.5)
-                continue
-            else:
-                raise e
-
-    raise RuntimeError(f"Tất cả Gemini API keys đều không dùng được. Lỗi cuối: {last_err}")
-
-
-def generate_gemini_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name):
+@st.cache_data(ttl=3600)
+def get_cached_ai_report(layer: str, roi_name: str, first_year: int, last_year: int, 
+                        first_val: float, last_val: float, high_area: float) -> Tuple[str, str, bool]:
+    """
+    Cached AI report generation (1 hour TTL).
+    """
     meta = CONFIG["layer_meta"][layer]
     prompt = (
         f"Viết 1 đoạn báo cáo khoa học (khoảng 160 chữ, tiếng Việt) về {roi_name} "
@@ -1280,39 +1355,40 @@ def generate_gemini_report(layer, first_year, last_year, first_val, last_val, hi
         f"cảnh báo môi trường cụ thể, đề xuất quy hoạch đô thị bền vững. "
         f"Không dùng gạch đầu dòng. Không dùng Markdown."
     )
-    last_err = None
-    for model in GEMINI_MODELS:
-        try:
-            report_text = call_gemini_with_rotation(
-                model_name=model,
-                contents=prompt,
-                system_instruction="You are an expert in Urban Dynamics and Remote Sensing. Provide responses in Vietnamese.",
-            )
-            if report_text:
-                return report_text
-        except Exception as e:
-            last_err = e
-            msg = str(e).upper()
-            transient = any(t in msg for t in ("503", "UNAVAILABLE", "DEADLINE_EXCEEDED"))
-            if transient:
-                continue
-            break
-
-    err_str = str(last_err or "")
-    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
-        return generate_local_report(
-            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
-            "het quota hoac quota free tier bang 0"
-        )
-    if "503" in err_str or "UNAVAILABLE" in err_str:
-        return generate_local_report(
-            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
-            "Gemini dang qua tai"
-        )
-    return generate_local_report(
-        layer, first_year, last_year, first_val, last_val, high_area, roi_name,
-        "API key khong hop le hoac chua co quota"
+    
+    text, provider, is_ai = call_ai_with_retry(
+        prompt=prompt,
+        system_instruction="You are an expert in Urban Dynamics and Remote Sensing. Provide responses in Vietnamese.",
+        max_retries=3
     )
+    
+    return text, provider, is_ai
+
+
+def generate_gemini_report(layer, first_year, last_year, first_val, last_val, high_area, roi_name):
+    """
+    Tạo báo cáo với fallback chain:
+    1. Gemini (primary) → OpenAI (secondary) → Local generation (fallback)
+    """
+    report_text, provider_used, is_ai_generated = get_cached_ai_report(
+        layer, roi_name, first_year, last_year, first_val, last_val, high_area
+    )
+    
+    # AI providers failed, use local generation
+    if not is_ai_generated:
+        report_text = generate_local_report(
+            layer, first_year, last_year, first_val, last_val, high_area, roi_name,
+            f"Tất cả AI providers không khả dụng. Sử dụng báo cáo hệ thống."
+        )
+        # Store status in session for UI feedback
+        st.session_state.last_report_provider = "Local (System)"
+        st.session_state.last_report_is_ai = False
+    else:
+        # AI provider succeeded
+        st.session_state.last_report_provider = provider_used
+        st.session_state.last_report_is_ai = True
+    
+    return report_text
 
 # ─── AI CHATBOT — context-rich Q&A ───────────────────────────────────────────
 def _build_chat_context(lat, lon, address, params, result, weather):
@@ -3496,7 +3572,7 @@ with col_report:
         if status == "Cảnh báo":
             st.error(f"🚨 Chỉ số {params.layer} đang ở mức nguy hiểm tại {result['roi_names']}!")
 
-        # ── Gemini AI report (fragment, không block UI chính) ────────────
+        # ── AI report (fragment, không block UI chính) ────────────
         @st.fragment
         def _ai_report_fragment():
             cached = st.session_state.get("cached_report")
@@ -3504,14 +3580,27 @@ with col_report:
 
             if cached:
                 st.markdown(f"<div class='ai-report'><div class='ai-report-text'>{cached}</div></div>", unsafe_allow_html=True)
+                
+                # Show provider status
+                provider = st.session_state.get("last_report_provider", "Unknown")
+                is_ai = st.session_state.get("last_report_is_ai", False)
+                
+                if is_ai:
+                    status_icon = "✅"
+                    status_msg = f"{status_icon} Báo cáo được tạo bởi AI: **{provider}**"
+                    st.success(status_msg, icon="🤖")
+                else:
+                    status_icon = "⚠️"
+                    status_msg = f"{status_icon} AI tạm gặp sự cố. Sử dụng báo cáo hệ thống."
+                    st.warning(status_msg)
                 return
 
             if not ai_trigger:
-                if st.button("🤖 Sinh báo cáo AI Gemini", use_container_width=True, key="btn_gen_ai"):
+                if st.button("🤖 Sinh báo cáo AI (Gemini/OpenAI)", use_container_width=True, key="btn_gen_ai"):
                     st.session_state["ai_trigger"] = True
                 return
 
-            with st.spinner("🤖 Gemini AI đang phân tích..."):
+            with st.spinner("🤖 AI đang phân tích... (thử Gemini, rồi OpenAI nếu cần)"):
                 report = generate_gemini_report(params.layer, first_y, last_y, l_mean_first, l_mean_last, a_high, result["roi_names"])
                 st.session_state["cached_report"] = report
 

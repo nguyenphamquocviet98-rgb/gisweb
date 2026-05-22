@@ -20,3 +20,5 @@ setuptools
 wheel
 sqlalchemy
 psycopg2-binary
+# AI Providers - Fallback chain support
+openai>=1.0.0  # Optional: ChatGPT as fallback when Gemini API fails
