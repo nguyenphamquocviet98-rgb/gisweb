@@ -1460,8 +1460,8 @@ def _build_chat_context(lat, lon, address, params, result, weather):
 def ai_chat_reply(user_message: str, lat: float, lon: float,
                   address: str, params, result, weather) -> str:
     """
-    Gemini chat reply có context phong phú từ data thực tế.
-    Có retry + fallback model như generate_gemini_report.
+    AI chat reply với fallback chain: Gemini → OpenAI → Local generation.
+    Có retry + exponential backoff như generate_gemini_report.
     """
     context = _build_chat_context(lat, lon, address, params, result, weather)
     prompt = f"""Bạn là chuyên gia GIS môi trường & thời tiết của hệ thống Urban Dynamics Intelligence Platform.
@@ -1478,34 +1478,20 @@ NGUYÊN TẮC TRẢ LỜI:
 Câu hỏi từ người dùng:
 {user_message}
 """
-    last_err = None
-    for model in GEMINI_MODELS:
-        try:
-            ai_response = call_gemini_with_rotation(
-                model_name=model,
-                contents=prompt,
-            )
-            if ai_response:
-                return ai_response.strip()
-        except Exception as e:
-            last_err = e
-            msg = str(e).upper()
-            transient = any(t in msg for t in ("503", "UNAVAILABLE", "DEADLINE_EXCEEDED"))
-            if transient:
-                continue
-            break
-
-    # Friendly Vietnamese error message
-    err_str = str(last_err or "")
-    if "RESOURCE_EXHAUSTED" in err_str or "429" in err_str or "Quota" in err_str:
-        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "Gemini hết quota")
-    if "503" in err_str or "UNAVAILABLE" in err_str:
-        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "Gemini đang quá tải")
-    if "401" in err_str or "API_KEY_INVALID" in err_str or "API KEY NOT VALID" in err_str.upper() or "API KEY EXPIRED" in err_str.upper():
-        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "API key Gemini không hợp lệ")
-    if "404" in err_str or "NOT_FOUND" in err_str:
-        return local_chat_reply(user_message, lat, lon, address, params, result, weather, "model Gemini không khả dụng")
-    return local_chat_reply(user_message, lat, lon, address, params, result, weather, type(last_err).__name__ if last_err else "không rõ")
+    
+    # Try AI providers with fallback chain
+    ai_response, provider_used, is_ai = call_ai_with_retry(
+        prompt=prompt,
+        system_instruction="You are an expert in GIS, environment, and weather. Respond in Vietnamese.",
+        max_retries=3
+    )
+    
+    if is_ai and ai_response:
+        return ai_response.strip()
+    
+    # All AI providers failed, use local fallback
+    return local_chat_reply(user_message, lat, lon, address, params, result, weather, 
+                           f"Tất cả AI providers không khả dụng (Gemini + OpenAI)")
 
 
 def local_chat_reply(user_message: str, lat: float, lon: float,
