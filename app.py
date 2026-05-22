@@ -19,6 +19,7 @@ except Exception:
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import ee
 import folium
@@ -159,6 +160,29 @@ CONFIG = {
                  "env_context": "nhiệt độ bề mặt đất và cường độ đảo nhiệt đô thị"},
     },
 }
+
+
+def available_months_for_years(years: List[str], now: Optional[datetime] = None) -> List[str]:
+    """Limit the current year's selectable months to months that have started."""
+    now = now or datetime.now(ZoneInfo("Asia/Ho_Chi_Minh"))
+    selected_years = []
+    for year in years:
+        try:
+            selected_years.append(int(year))
+        except (TypeError, ValueError):
+            continue
+
+    if not selected_years:
+        return CONFIG["months"]
+
+    if any(year > now.year for year in selected_years):
+        return []
+
+    if now.year in selected_years:
+        return [f"{i:02d}" for i in range(1, now.month + 1)]
+
+    return CONFIG["months"]
+
 
 # ─── GEMINI MULTI-KEY CONFIGURATION (KEY ROTATION) ───────────────────────────
 def get_secret_or_env(name: str, default: str = "") -> str:
@@ -3730,15 +3754,27 @@ with col_ctrl:
     st.markdown("<br><div class='section-header'>Tham số Thu thập</div>", unsafe_allow_html=True)
     with st.container(border=True):
         layer      = st.selectbox("Chỉ số Viễn thám", ["NDBI", "LST", "NDVI"])
-        month      = st.selectbox("Tháng đồng bộ", CONFIG["months"], index=2)
         years_multi = st.multiselect("Các năm phân tích", CONFIG["years"],
                                      default=["2021", "2023", "2025"])
+        month_options = available_months_for_years(years_multi)
+        if month_options:
+            default_month = "03" if "03" in month_options else month_options[-1]
+            month = st.selectbox(
+                "Tháng đồng bộ",
+                month_options,
+                index=month_options.index(default_month),
+            )
+        else:
+            month = None
+            st.warning("⚠️ Năm tương lai chưa có dữ liệu thực tế.")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
     if st.button("🚀 KHỞI CHẠY HỆ THỐNG", use_container_width=True, type="primary"):
         if not years_multi:
             st.warning("⚠️ Chọn ít nhất 1 năm!")
+        elif not month:
+            st.warning("⚠️ Chọn thời gian đã diễn ra để phân tích!")
         else:
             params  = AnalysisParams(country, selected_subregions, layer, month, years_multi)
             years_s = sorted(years_multi)
