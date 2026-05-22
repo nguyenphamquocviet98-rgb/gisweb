@@ -1003,6 +1003,100 @@ def forecast_land_use(df_hist: pd.DataFrame,
     out["last_hist_year"] = last_hist_year
     return out
 
+
+def build_2035_scenario_summary(layer: str, labels: list, classes: list,
+                                cur_row: pd.Series, fc: dict,
+                                last_y: int, avg_mape: Optional[float] = None) -> dict:
+    """Build a compact scenario layer for the 2035 forecast tab."""
+    total_now = sum(float(cur_row.get(c) or 0) for c in classes)
+    values_2035 = {c: float(fc.get(2035, {}).get(c) or 0) for c in classes}
+    total_2035 = sum(values_2035.values())
+
+    bad_classes = {
+        "NDVI": ("class_1", "class_2"),
+        "NDBI": ("class_3", "class_4"),
+        "LST":  ("class_3", "class_4"),
+    }[layer]
+    good_classes = tuple(c for c in classes if c not in bad_classes)
+
+    bad_now = sum(float(cur_row.get(c) or 0) for c in bad_classes)
+    bad_2035 = sum(values_2035.get(c, 0) for c in bad_classes)
+    good_now = sum(float(cur_row.get(c) or 0) for c in good_classes)
+    good_2035 = sum(values_2035.get(c, 0) for c in good_classes)
+
+    bad_delta = bad_2035 - bad_now
+    bad_pct = (bad_delta / bad_now * 100) if bad_now > 0 else 0
+    pressure_now = (bad_now / total_now * 100) if total_now > 0 else 0
+    pressure_2035 = (bad_2035 / total_2035 * 100) if total_2035 > 0 else 0
+
+    uncertainty = 0.0
+    for c in bad_classes:
+        lo = float(fc.get(2035, {}).get(c + "_lo") or values_2035.get(c, 0))
+        hi = float(fc.get(2035, {}).get(c + "_hi") or values_2035.get(c, 0))
+        uncertainty += max(0.0, hi - lo)
+    uncertainty_pct = (uncertainty / total_2035 * 100) if total_2035 > 0 else 0
+
+    if avg_mape is None:
+        confidence_score = max(35, min(85, 80 - uncertainty_pct * 1.2))
+    else:
+        confidence_score = max(20, min(95, 100 - avg_mape * 1.8 - uncertainty_pct))
+    if confidence_score >= 75:
+        confidence_label, confidence_color = "Cao", "#059669"
+    elif confidence_score >= 55:
+        confidence_label, confidence_color = "Trung bình", "#d97706"
+    else:
+        confidence_label, confidence_color = "Thận trọng", "#dc2626"
+
+    if layer == "NDVI":
+        pressure_name = "suy giảm xanh"
+        impact_text = "giảm năng lực điều hòa vi khí hậu và tăng rủi ro dòng chảy mặt"
+        action_focus = "bảo vệ lõi xanh, phục hồi hành lang cây xanh và hạn chế chuyển đổi đất phủ xanh"
+    elif layer == "NDBI":
+        pressure_name = "bê tông hóa"
+        impact_text = "tăng bề mặt không thấm nước, áp lực thoát nước và đảo nhiệt đô thị"
+        action_focus = "kiểm soát mật độ xây dựng, tăng vật liệu thấm nước và hạ tầng xanh-xanh dương"
+    else:
+        pressure_name = "stress nhiệt"
+        impact_text = "tăng stress nhiệt, giảm tiện nghi ngoài trời và tăng nhu cầu làm mát"
+        action_focus = "tăng bóng mát, giảm vật liệu hấp thụ nhiệt và bổ sung không gian nước/cây xanh"
+
+    cls_rows = []
+    for c, lbl in zip(classes, labels):
+        now = float(cur_row.get(c) or 0)
+        fut = values_2035.get(c, 0)
+        delta = fut - now
+        cls_rows.append((lbl, c, now, fut, delta, (delta / now * 100) if now > 0 else 0))
+    dominant = max(cls_rows, key=lambda r: abs(r[4])) if cls_rows else None
+
+    green_2035 = bad_now + bad_delta * (0.55 if bad_delta > 0 else 0.75)
+    stress_2035 = bad_2035 + max(abs(bad_delta), bad_2035 * 0.05) * 0.35
+    green_2035 = max(0, min(total_2035, green_2035))
+    stress_2035 = max(0, min(total_2035, stress_2035))
+
+    return {
+        "pressure_name": pressure_name,
+        "pressure_now": pressure_now,
+        "pressure_2035": pressure_2035,
+        "bad_now": bad_now,
+        "bad_2035": bad_2035,
+        "bad_delta": bad_delta,
+        "bad_pct": bad_pct,
+        "good_delta": good_2035 - good_now,
+        "uncertainty_pct": uncertainty_pct,
+        "confidence_score": confidence_score,
+        "confidence_label": confidence_label,
+        "confidence_color": confidence_color,
+        "dominant": dominant,
+        "impact_text": impact_text,
+        "action_focus": action_focus,
+        "scenarios": [
+            ("Cơ sở", bad_2035, "Giữ xu hướng lịch sử đến 2035"),
+            ("Can thiệp xanh", green_2035, "Giảm tốc vùng rủi ro nhờ quy hoạch chủ động"),
+            ("Chậm can thiệp", stress_2035, "Rủi ro tăng nếu mở rộng đô thị thiếu kiểm soát"),
+        ],
+        "horizon": 2035 - int(last_y),
+    }
+
 # ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 def fmt_val(layer, v):
     if v is None:
@@ -2920,6 +3014,8 @@ def render_chart_forecast(result, params):
     # ── 0. Đánh giá độ chính xác mô hình Prophet (backtest) ────────────────
     eval_m = fc.get("eval_metrics", {})
     valid_evals = {c: m for c, m in eval_m.items() if m}
+    avg_mape = None
+    avg_rmse = None
     if valid_evals:
         # Trung bình MAPE qua các lớp có metric hợp lệ
         mape_vals = [m["MAPE"] for m in valid_evals.values() if m.get("MAPE") is not None]
@@ -3069,6 +3165,70 @@ def render_chart_forecast(result, params):
             )
             col.plotly_chart(pie, use_container_width=True,
                              config={"displayModeBar": False})
+
+    # ── 2b. Scenario cockpit 2035 ─────────────────────────────────────────
+    scenario = build_2035_scenario_summary(
+        params.layer, labels, classes, cur_row, fc, last_y, avg_mape
+    )
+    pressure_delta = scenario["pressure_2035"] - scenario["pressure_now"]
+    dominant = scenario.get("dominant")
+    dom_text = "Ổn định"
+    if dominant:
+        dom_text = f"{dominant[0]} {dominant[5]:+.1f}%"
+
+    st.markdown(
+        "<div style='font-size:11px;font-weight:700;color:#64748b;margin:14px 0 6px;"
+        "text-transform:uppercase;letter-spacing:0.5px;'>Bảng điều khiển kịch bản 2035</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div style='display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:12px;'>"
+        f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;'>Áp lực {scenario['pressure_name']}</div>"
+        f"    <div style='font-size:20px;font-weight:800;color:#0f172a;font-family:JetBrains Mono;'>{scenario['pressure_2035']:.1f}%</div>"
+        f"    <div style='font-size:10px;color:{'#dc2626' if pressure_delta > 0 else '#059669'};font-weight:700;'>{pressure_delta:+.1f} điểm % vs {last_y}</div>"
+        f"  </div>"
+        f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;'>Vùng rủi ro 2035</div>"
+        f"    <div style='font-size:20px;font-weight:800;color:#dc2626;font-family:JetBrains Mono;'>{scenario['bad_2035']:,.0f}</div>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;'>Ha, {scenario['bad_pct']:+.1f}% vs {last_y}</div>"
+        f"  </div>"
+        f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;'>Độ tin cậy</div>"
+        f"    <div style='font-size:20px;font-weight:800;color:{scenario['confidence_color']};font-family:JetBrains Mono;'>{scenario['confidence_score']:.0f}/100</div>"
+        f"    <div style='font-size:10px;color:{scenario['confidence_color']};font-weight:700;'>{scenario['confidence_label']} · CI {scenario['uncertainty_pct']:.1f}% diện tích</div>"
+        f"  </div>"
+        f"  <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;'>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;text-transform:uppercase;'>Chuyển dịch lớn nhất</div>"
+        f"    <div style='font-size:13px;font-weight:800;color:#0f172a;line-height:1.25;'>{dom_text}</div>"
+        f"    <div style='font-size:10px;color:#64748b;font-weight:700;'>Horizon {scenario['horizon']} năm</div>"
+        f"  </div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    scen_cols = st.columns(3)
+    scen_colors = ["#0891b2", "#059669", "#dc2626"]
+    total_2035 = max(sum(float(fc.get(2035, {}).get(c) or 0) for c in classes), 1)
+    for col, item, color in zip(scen_cols, scenario["scenarios"], scen_colors):
+        title, value, note = item
+        pct_total = value / total_2035 * 100
+        col.markdown(
+            f"<div style='background:#ffffff;border:1px solid #e2e8f0;border-left:4px solid {color};"
+            f"border-radius:8px;padding:10px 12px;min-height:96px;'>"
+            f"<div style='font-size:12px;font-weight:800;color:#0f172a;'>{title}</div>"
+            f"<div style='font-size:22px;font-weight:800;color:{color};font-family:JetBrains Mono;'>{value:,.0f} Ha</div>"
+            f"<div style='font-size:10px;color:#64748b;font-weight:700;'>{pct_total:.1f}% tổng diện tích</div>"
+            f"<div style='font-size:11px;color:#475569;line-height:1.35;margin-top:4px;'>{note}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.info(
+        f"🧭 **Kịch bản chuyên gia:** đến 2035, áp lực {scenario['pressure_name']} có thể dẫn tới "
+        f"{scenario['impact_text']}. Trọng tâm can thiệp nên là {scenario['action_focus']}. "
+        f"Giai đoạn 2027-2030 nên dùng để khoanh vùng ưu tiên; giai đoạn 2031-2035 dùng để đo hiệu quả và điều chỉnh quy hoạch."
+    )
 
     # ── 3. Bảng delta + cảnh báo ──────────────────────────────────────────
     st.markdown("<div style='font-size:11px;font-weight:700;color:#64748b;margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px;'>Biến động dự báo 2035 vs " + str(last_y) + "</div>", unsafe_allow_html=True)
