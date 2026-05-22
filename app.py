@@ -3038,8 +3038,7 @@ def render_chart_chat(result, params):
 
     # Render lịch sử
     for msg in st.session_state["chat_history"]:
-        avatar = "👤" if msg["role"] == "user" else "◎"
-        with st.chat_message(msg["role"], avatar=avatar):
+        with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     # Input
@@ -3054,10 +3053,10 @@ def render_chart_chat(result, params):
         st.session_state["chat_history"].append(
             {"role": "user", "content": user_input}
         )
-        with st.chat_message("user", avatar="👤"):
+        with st.chat_message("user"):
             st.markdown(user_input)
 
-        with st.chat_message("assistant", avatar="◎"):
+        with st.chat_message("assistant"):
             with st.spinner("Đang đọc dữ liệu đang hiển thị..."):
                 # Lấy weather (cache 30min đã có sẵn)
                 try:
