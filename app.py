@@ -1609,12 +1609,136 @@ def _build_chat_context(lat, lon, address, params, result, weather):
     return "\n".join(parts)
 
 
+def get_chat_suggested_questions(params=None, result=None, has_click: bool = False) -> list:
+    layer = params.layer if params else "chỉ số"
+    questions = [
+        f"Tóm tắt nhanh dữ liệu {layer} hiện tại",
+        f"Xu hướng {layer} đang tăng hay giảm?",
+        "Vùng nào rủi ro cao nhất?",
+        "So sánh các vùng đang chọn",
+        "Dự báo đến 2035 có đáng lo không?",
+        "Nên ưu tiên giải pháp quy hoạch nào?",
+    ]
+    if has_click:
+        questions.insert(0, "Điểm tôi vừa click có gì đáng chú ý?")
+        questions.insert(1, "Thời tiết tuần tới có ảnh hưởng gì không?")
+    return questions[:8]
+
+
+def answer_basic_data_question(user_message: str, lat: float, lon: float,
+                               address: str, params, result, weather) -> Optional[str]:
+    """Fast deterministic answers for common data questions, before calling external AI."""
+    if not params or not result:
+        return None
+
+    msg = (user_message or "").lower()
+    stats_last = result.get("stats_last") or {}
+    stats_first = result.get("stats_first") or {}
+    first_y, last_y = result.get("first_y", "?"), result.get("last_y", "?")
+    layer = params.layer
+    m_last = stats_last.get(f"{layer}_mean")
+    m_first = stats_first.get(f"{layer}_mean")
+    area_last = result.get("area_last") or []
+    bad_classes = {"NDVI": (1, 2), "NDBI": (3, 4), "LST": (3, 4)}[layer]
+    total_area = sum(float(g.get("sum") or 0) for g in area_last)
+    risk_area = sum(float(g.get("sum") or 0) for g in area_last if int(g.get("group", 0)) in bad_classes)
+    risk_pct = (risk_area / total_area * 100) if total_area > 0 else 0
+
+    def trend_sentence():
+        if m_first is None or m_last is None:
+            return "Chuỗi số liệu chưa đủ để tính xu hướng trung bình."
+        delta = m_last - m_first
+        pct = (delta / abs(m_first) * 100) if m_first else None
+        direction = "tăng" if delta > 0 else "giảm" if delta < 0 else "gần như không đổi"
+        status, _ = layer_status(layer, m_last)
+        pct_text = f", tương đương {pct:+.1f}%" if pct is not None else ""
+        return (
+            f"{layer} trung bình {direction} từ {fmt_val(layer, m_first)} năm {first_y} "
+            f"đến {fmt_val(layer, m_last)} năm {last_y} (Δ={delta:+.4f}{pct_text}). "
+            f"Trạng thái hiện tại: {status}."
+        )
+
+    if any(k in msg for k in ("tóm tắt", "tong quan", "tổng quan", "khái quát", "data", "dữ liệu", "du lieu")):
+        roi = result.get("roi_names", params.country)
+        return (
+            f"📌 Tổng quan {roi}: {trend_sentence()} "
+            f"Diện tích nhóm rủi ro theo {layer} hiện khoảng {risk_area:,.0f} ha, chiếm {risk_pct:.1f}% vùng phân tích. "
+            f"Dữ liệu đang dùng tháng {params.month}, giai đoạn {first_y}-{last_y}."
+        )
+
+    if any(k in msg for k in ("xu hướng", "xu huong", "tăng", "giảm", "trend", "so với")):
+        return f"📈 {trend_sentence()}"
+
+    if any(k in msg for k in ("so sánh", "so sanh", "vùng nào", "vung nao", "cao nhất", "thấp nhất", "rủi ro cao")):
+        bd = result.get("bar_data") or []
+        valid = [r for r in bd if r.get("Trị số") is not None]
+        if not valid:
+            return "Cần chọn từ 2 vùng trở lên để so sánh theo vùng."
+        high = max(valid, key=lambda r: r["Trị số"])
+        low = min(valid, key=lambda r: r["Trị số"])
+        return (
+            f"🌐 So sánh vùng theo {layer}: {high.get('Khu vực')} cao nhất ({high.get('Trị số'):.3f}), "
+            f"{low.get('Khu vực')} thấp nhất ({low.get('Trị số'):.3f}). "
+            f"Với NDVI, giá trị cao thường tốt hơn; với NDBI/LST, giá trị cao thường cần theo dõi hơn."
+        )
+
+    if any(k in msg for k in ("thời tiết", "thoi tiet", "mưa", "mua", "gió", "gio", "nhiệt", "weather")):
+        if not weather or not weather.get("current"):
+            return None
+        w = weather["current"]
+        text = (
+            f"⛅ Hiện tại khoảng {w.get('temp', '?')}°C, gió {w.get('wind', '?')} km/h, "
+            f"độ ẩm {w.get('humidity', '?')}% tại {address or f'{lat:.4f}, {lon:.4f}'}."
+        )
+        fc = weather.get("forecast") or []
+        rainy = [d for d in fc[:7] if (d.get("rain_prob") or 0) >= 50]
+        if rainy:
+            days = ", ".join(f"{d.get('date')} ({d.get('rain_prob')}%)" for d in rainy[:3])
+            text += f" Khả năng mưa đáng chú ý: {days}."
+        else:
+            text += " 7 ngày tới chưa thấy ngày nào có xác suất mưa vượt 50%."
+        return text
+
+    if any(k in msg for k in ("2035", "dự báo", "du bao", "dự đoán", "du doan", "tương lai")):
+        return (
+            f"🔮 Dự báo 2035 nằm trong tab Dự báo 2035. Cách đọc nhanh: vùng rủi ro hiện là "
+            f"{risk_area:,.0f} ha ({risk_pct:.1f}%); nếu xu hướng {layer} bất lợi tiếp diễn, cần ưu tiên "
+            f"khoanh vùng can thiệp từ giai đoạn 2027-2030 rồi đo hiệu quả đến 2035."
+        )
+
+    if any(k in msg for k in ("khuyến nghị", "khuyen nghi", "giải pháp", "giai phap", "quy hoạch", "ưu tiên", "uu tien")):
+        if layer == "NDVI":
+            action = "bảo vệ lõi xanh, tăng cây bóng mát, phục hồi hành lang sinh thái và hạn chế chuyển đổi đất xanh."
+        elif layer == "NDBI":
+            action = "kiểm soát mật độ xây dựng, tăng bề mặt thấm nước, bổ sung hạ tầng xanh-xanh dương và giám sát điểm bê tông hóa."
+        else:
+            action = "tăng che phủ cây xanh, giảm vật liệu hấp thụ nhiệt, bổ sung mặt nước và ưu tiên vùng nóng liên tục."
+        return f"🧭 Khuyến nghị theo {layer}: {action} Ưu tiên trước các khu có diện tích rủi ro cao ({risk_area:,.0f} ha)."
+
+    click = st.session_state.get("map_click_value") or {}
+    if click and any(k in msg for k in ("click", "điểm", "diem", "tọa độ", "toa do", "ở đây", "o day")):
+        vals = []
+        for k in ("NDVI", "NDBI", "LST"):
+            v = click.get(k)
+            if v is not None:
+                suffix = "°C" if k == "LST" else ""
+                vals.append(f"{k}={v:.3f}{suffix}")
+        if vals:
+            return f"📍 Điểm đã click tại {address or f'{lat:.4f}, {lon:.4f}'} có " + ", ".join(vals) + "."
+
+    return None
+
+
 def ai_chat_reply(user_message: str, lat: float, lon: float,
                   address: str, params, result, weather) -> str:
     """
     AI chat reply với fallback chain: Gemini → OpenAI → Local generation.
     Có retry + exponential backoff như generate_gemini_report.
     """
+    basic_reply = answer_basic_data_question(user_message, lat, lon, address, params, result, weather)
+    if basic_reply:
+        return basic_reply
+
     context = _build_chat_context(lat, lon, address, params, result, weather)
     prompt = f"""Bạn là chuyên gia GIS môi trường & thời tiết của hệ thống Urban Dynamics Intelligence Platform.
 
@@ -2795,6 +2919,18 @@ def render_chart_chat(result, params):
                 "- *Nên trồng cây ở đây không?*\n"
                 "- *So sánh với 5 năm trước thì sao?*")
 
+    quick_prompt = None
+    suggestions = get_chat_suggested_questions(params, result, has_click=bool(click))
+    st.markdown(
+        "<div style='font-size:11px;font-weight:700;color:#64748b;margin:6px 0 4px;"
+        "text-transform:uppercase;letter-spacing:0.5px;'>Câu hỏi nhanh về dữ liệu</div>",
+        unsafe_allow_html=True,
+    )
+    q_cols = st.columns(2)
+    for i, question in enumerate(suggestions):
+        if q_cols[i % 2].button(question, key=f"quick_chat_{i}", use_container_width=True):
+            quick_prompt = question
+
     # Render lịch sử
     for msg in st.session_state["chat_history"]:
         avatar = "🧑" if msg["role"] == "user" else "🤖"
@@ -2806,6 +2942,9 @@ def render_chart_chat(result, params):
         "Hỏi về thời tiết, môi trường, đô thị... ",
         key="chat_input_main",
     )
+    if quick_prompt:
+        user_input = quick_prompt
+
     if user_input:
         st.session_state["chat_history"].append(
             {"role": "user", "content": user_input}
